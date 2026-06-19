@@ -22,15 +22,15 @@ router.register(r"reminders", ReminderViewSet, basename="reminder")
 
 urlpatterns = [
     # n8n integration endpoints — must come BEFORE the router
-    path("api/v1/reminders/pending/", PendingRemindersView.as_view(), name="reminders-pending"),
+    path("nudgy/api/v1/reminders/pending/", PendingRemindersView.as_view(), name="reminders-pending"),
     path(
-        "api/v1/reminders/<uuid:external_id>/trigger/",
+        "nudgy/api/v1/reminders/<uuid:external_id>/trigger/",
         TriggerReminderView.as_view(),
         name="reminders-trigger",
     ),
     # REST API — CRUD (router)
-    path("api/v1/", include(router.urls)),
+    path("nudgy/api/v1/", include(router.urls)),
     # Mattermost webhooks
-    path("mattermost/slash/remind/", SlashRemindView.as_view(), name="mattermost-slash-remind"),
-    path("mattermost/dialog/submit/", DialogSubmitView.as_view(), name="mattermost-dialog-submit"),
+    path("nudgy/mattermost/slash/remind/", SlashRemindView.as_view(), name="mattermost-slash-remind"),
+    path("nudgy/mattermost/dialog/submit/", DialogSubmitView.as_view(), name="mattermost-dialog-submit"),
 ]
