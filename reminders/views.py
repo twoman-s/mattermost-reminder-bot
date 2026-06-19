@@ -56,6 +56,31 @@ class ReminderViewSet(viewsets.ModelViewSet):
     lookup_field = "external_id"
     permission_classes = [AllowAny]
 
+    def create(self, request: Request, *args, **kwargs) -> Response:
+        logger.info("API create reminder — data: %s", request.data)
+        response = super().create(request, *args, **kwargs)
+        logger.info("Reminder created via API — external_id: %s", response.data.get("external_id"))
+        return response
+
+    def update(self, request: Request, *args, **kwargs) -> Response:
+        logger.info("API update reminder — external_id: %s, data: %s", kwargs.get("external_id"), request.data)
+        response = super().update(request, *args, **kwargs)
+        logger.info("Reminder updated via API — external_id: %s", response.data.get("external_id"))
+        return response
+
+    def partial_update(self, request: Request, *args, **kwargs) -> Response:
+        logger.info("API partial update — external_id: %s, data: %s", kwargs.get("external_id"), request.data)
+        response = super().partial_update(request, *args, **kwargs)
+        logger.info("Reminder patched via API — external_id: %s", response.data.get("external_id"))
+        return response
+
+    def destroy(self, request: Request, *args, **kwargs) -> Response:
+        external_id = kwargs.get("external_id")
+        logger.info("API delete reminder — external_id: %s", external_id)
+        response = super().destroy(request, *args, **kwargs)
+        logger.info("Reminder deleted via API — external_id: %s", external_id)
+        return response
+
 
 # ======================================================================
 # n8n Integration Endpoints
@@ -85,6 +110,7 @@ class PendingRemindersView(APIView):
             reminder_datetime__lte=now,
         )
         serializer = PendingReminderSerializer(reminders, many=True)
+        logger.info("Pending reminders query — found %d due (as of %s).", reminders.count(), now)
         return Response(serializer.data)
 
 
@@ -112,20 +138,35 @@ class TriggerReminderView(APIView):
         },
     )
     def post(self, request: Request, external_id: str) -> Response:
+        logger.info("Trigger requested — external_id: %s", external_id)
         try:
             reminder = Reminder.objects.get(
                 external_id=external_id,
                 status=ReminderStatus.PENDING,
             )
         except Reminder.DoesNotExist:
+            logger.warning("Trigger failed — reminder %s not found or not pending.", external_id)
             return Response(
                 {"detail": "Reminder not found or not pending."},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
         service = ReminderExecutionService()
-        reminder = service.trigger_reminder(reminder)
+        try:
+            reminder = service.trigger_reminder(reminder)
+        except Exception:
+            logger.error("Trigger execution failed — external_id: %s", external_id, exc_info=True)
+            return Response(
+                {"detail": "Failed to trigger reminder."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
+        logger.info(
+            "Trigger complete — external_id: %s, new_status: %s, next_datetime: %s",
+            reminder.external_id,
+            reminder.status,
+            reminder.reminder_datetime,
+        )
         serializer = TriggerResponseSerializer(reminder)
         return Response(serializer.data)
 
@@ -153,8 +194,18 @@ class SlashRemindView(APIView):
     )
     def post(self, request: Request) -> Response:
         trigger_id: str = request.data.get("trigger_id", "")
+        user_id: str = request.data.get("user_id", "unknown")
+        channel_id: str = request.data.get("channel_id", "unknown")
+
+        logger.info(
+            "Slash /remind received — trigger_id: %s, user: %s, channel: %s",
+            trigger_id,
+            user_id,
+            channel_id,
+        )
+
         if not trigger_id:
-            logger.warning("Slash command received without trigger_id.")
+            logger.warning("Slash command received without trigger_id — payload: %s", request.data)
             return Response(
                 {"text": "Missing trigger_id. Please try again."},
                 status=status.HTTP_200_OK,
@@ -162,7 +213,8 @@ class SlashRemindView(APIView):
 
         # Build the callback URL that Mattermost will POST the dialog
         # submission to. We use the request to derive the host.
-        callback_url = request.build_absolute_uri("/mattermost/dialog/submit/")
+        callback_url = request.build_absolute_uri("/nudgy/mattermost/dialog/submit/")
+        logger.debug("Dialog callback URL: %s", callback_url)
 
         mm_service = MattermostService()
         dialog_request = mm_service.open_reminder_dialog(trigger_id)
@@ -171,12 +223,17 @@ class SlashRemindView(APIView):
         try:
             mm_service.post_open_dialog(dialog_request)
         except Exception:
-            logger.exception("Failed to open Mattermost dialog.")
+            logger.error(
+                "Failed to open Mattermost dialog — trigger_id: %s",
+                trigger_id,
+                exc_info=True,
+            )
             return Response(
                 {"text": "Failed to open reminder dialog. Please try again."},
                 status=status.HTTP_200_OK,
             )
 
+        logger.info("Dialog opened successfully for user %s.", user_id)
         # Mattermost expects a 200 with empty body (or optional ephemeral text).
         return Response(status=status.HTTP_200_OK)
 
@@ -204,6 +261,13 @@ class DialogSubmitView(APIView):
         user_id: str = payload.get("user_id", "")
         channel_id: str = payload.get("channel_id", "")
 
+        logger.info(
+            "Dialog submission received — user: %s, channel: %s, submission: %s",
+            user_id,
+            channel_id,
+            submission,
+        )
+
         # --- Validate required fields ---
         errors: dict[str, str] = {}
 
@@ -229,6 +293,7 @@ class DialogSubmitView(APIView):
                 errors["reminder_date"] = "Invalid date/time format. Use YYYY-MM-DD and HH:MM."
 
         if errors:
+            logger.warning("Dialog validation failed — user: %s, errors: %s", user_id, errors)
             # Mattermost expects {"errors": {...}} to display inline validation.
             return Response({"errors": errors}, status=status.HTTP_200_OK)
 
@@ -247,6 +312,16 @@ class DialogSubmitView(APIView):
             snooze_minutes=snooze_minutes,
         )
 
+        logger.info(
+            "Reminder created from dialog — external_id: %s, title: '%s', "
+            "datetime: %s, repeat: %s, user: %s",
+            reminder.external_id,
+            reminder.title,
+            reminder.reminder_datetime,
+            reminder.repeat_type,
+            user_id,
+        )
+
         # --- Send confirmation back ---
         mm_service = MattermostService()
         confirmation = (
@@ -261,8 +336,14 @@ class DialogSubmitView(APIView):
                 mm_service.send_channel_message(channel_id, confirmation)
             else:
                 mm_service.send_reminder_channel_message(confirmation)
+            logger.info("Confirmation message sent to channel %s.", channel_id or "(default)")
         except Exception:
-            logger.exception("Failed to send confirmation message.")
+            logger.error(
+                "Failed to send confirmation — external_id: %s, channel: %s",
+                reminder.external_id,
+                channel_id,
+                exc_info=True,
+            )
 
         # Return empty 200 so Mattermost doesn't show an error.
         return Response(status=status.HTTP_200_OK)

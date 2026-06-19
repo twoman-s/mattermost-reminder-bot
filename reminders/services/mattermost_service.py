@@ -51,15 +51,27 @@ class MattermostService:
 
     def _get(self, path: str, **kwargs: Any) -> requests.Response:
         url = self._api(path)
-        resp = requests.get(url, headers=self._headers, timeout=10, **kwargs)
-        resp.raise_for_status()
-        return resp
+        logger.debug("MM API GET %s", url)
+        try:
+            resp = requests.get(url, headers=self._headers, timeout=10, **kwargs)
+            resp.raise_for_status()
+            logger.debug("MM API GET %s — %d", url, resp.status_code)
+            return resp
+        except requests.RequestException:
+            logger.error("MM API GET %s failed", url, exc_info=True)
+            raise
 
     def _post(self, path: str, json: dict | None = None, **kwargs: Any) -> requests.Response:
         url = self._api(path)
-        resp = requests.post(url, headers=self._headers, json=json, timeout=10, **kwargs)
-        resp.raise_for_status()
-        return resp
+        logger.debug("MM API POST %s — payload: %s", url, json)
+        try:
+            resp = requests.post(url, headers=self._headers, json=json, timeout=10, **kwargs)
+            resp.raise_for_status()
+            logger.debug("MM API POST %s — %d", url, resp.status_code)
+            return resp
+        except requests.RequestException:
+            logger.error("MM API POST %s failed — payload: %s", url, json, exc_info=True)
+            raise
 
     # ------------------------------------------------------------------
     # Discovery
@@ -181,15 +193,18 @@ class MattermostService:
 
     def send_channel_message(self, channel_id: str, message: str) -> dict:
         """Post a message to a Mattermost channel."""
+        logger.info("Sending message to channel %s (length=%d).", channel_id, len(message))
         payload = {
             "channel_id": channel_id,
             "message": message,
         }
         resp = self._post("/posts", json=payload)
+        logger.info("Message sent to channel %s.", channel_id)
         return resp.json()
 
     def send_reminder_channel_message(self, message: str) -> dict:
         """Post a message to the configured reminder channel."""
+        logger.info("Sending message to reminder channel (%s).", self.channel_id)
         return self.send_channel_message(self.channel_id, message)
 
     def send_ephemeral_post(self, channel_id: str, user_id: str, message: str) -> dict:
