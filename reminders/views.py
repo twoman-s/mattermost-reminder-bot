@@ -237,6 +237,70 @@ class SlashRemindView(APIView):
         return Response(status=status.HTTP_200_OK)
 
 
+class SlashListRemindersView(APIView):
+    """
+    POST /mattermost/slash/listr/
+
+    Receives the Mattermost slash-command payload and returns an ephemeral
+    message containing a Markdown table of the user's pending reminders.
+    """
+
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        tags=["Mattermost"],
+        summary="Handle /listr slash command",
+        description="Returns an ephemeral message with a table of pending reminders.",
+        responses={200: OpenApiResponse(description="Markdown table of reminders.")},
+    )
+    def post(self, request: Request) -> Response:
+        user_id: str = request.data.get("user_id", "")
+        
+        logger.info("Slash /listr received — user: %s", user_id)
+
+        # In a personal self-hosted app, we can show all pending reminders,
+        # but filtering by user_id makes it cleaner if there are multiple users.
+        # We will show all pending if user_id is missing for some reason.
+        qs = Reminder.objects.filter(status=ReminderStatus.PENDING).order_by("reminder_datetime")
+        if user_id:
+            qs = qs.filter(mattermost_user_id=user_id)
+
+        reminders = list(qs)
+
+        if not reminders:
+            return Response(
+                {
+                    "response_type": "ephemeral",
+                    "text": "You don't have any pending reminders.",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # Build Markdown table
+        lines = [
+            "### 📅 Your Pending Reminders",
+            "",
+            "| Title | Scheduled Time | Recurrence |",
+            "|:------|:---------------|:-----------|",
+        ]
+        
+        for r in reminders:
+            time_str = r.reminder_datetime.strftime("%Y-%m-%d %H:%M")
+            recurrence = r.recurrence_summary()
+            
+            # Escape pipes to avoid breaking the markdown table
+            title = r.title.replace("|", r"\|")
+            lines.append(f"| **{title}** | `{time_str}` | {recurrence} |")
+
+        return Response(
+            {
+                "response_type": "ephemeral",
+                "text": "\n".join(lines),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class DialogRefreshView(APIView):
     """
     POST /mattermost/dialog/refresh/
