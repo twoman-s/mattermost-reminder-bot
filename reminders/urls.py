@@ -9,6 +9,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from reminders.views import (
+    DialogRefreshView,
     DialogSubmitView,
     PendingRemindersView,
     ReminderViewSet,
@@ -33,4 +34,5 @@ urlpatterns = [
     # Mattermost webhooks
     path("mattermost/slash/remind/", SlashRemindView.as_view(), name="mattermost-slash-remind"),
     path("mattermost/dialog/submit/", DialogSubmitView.as_view(), name="mattermost-dialog-submit"),
+    path("mattermost/dialog/refresh/", DialogRefreshView.as_view(), name="mattermost-dialog-refresh"),
 ]

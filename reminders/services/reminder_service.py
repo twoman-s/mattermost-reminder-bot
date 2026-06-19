@@ -1,17 +1,18 @@
 """
-Service for executing reminders and managing recurring schedules.
+Service for executing reminders and managing their lifecycle.
+
+Delegates recurrence calculation to RecurrenceService.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 
-from dateutil.relativedelta import relativedelta
 from django.utils import timezone
 
 from reminders.models import Reminder, ReminderStatus, RepeatType
 from reminders.services.mattermost_service import MattermostService
+from reminders.services.recurrence_service import RecurrenceService
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +23,9 @@ class ReminderExecutionService:
 
     Responsibilities:
       - Format and send the reminder message to Mattermost
-      - Mark one-off reminders as completed
-      - Advance recurring reminders to their next occurrence
+      - Increment occurrence_count
+      - Delegate next-occurrence calculation to RecurrenceService
+      - Check end conditions and complete reminders when appropriate
     """
 
     def __init__(self, mattermost_service: MattermostService | None = None) -> None:
@@ -37,72 +39,46 @@ class ReminderExecutionService:
         """
         Execute a single reminder:
           1. Send the Mattermost message
-          2. Update last_triggered_at
-          3. Complete or reschedule depending on repeat_type
+          2. Increment occurrence_count
+          3. Update last_triggered_at
+          4. Complete or reschedule depending on recurrence
         """
         self._send_reminder_message(reminder)
 
         reminder.last_triggered_at = timezone.now()
+        reminder.occurrence_count += 1
 
         if reminder.repeat_type == RepeatType.NONE:
+            # One-time reminder — done
             reminder.status = ReminderStatus.COMPLETED
             reminder.completed_at = timezone.now()
             logger.info("Reminder %s completed (one-off).", reminder.external_id)
         else:
-            next_dt = self.calculate_next_occurrence(
-                current_datetime=reminder.reminder_datetime,
-                repeat_type=reminder.repeat_type,
-            )
-            reminder.reminder_datetime = next_dt
-            reminder.reminder_date = next_dt.date()
-            logger.info(
-                "Reminder %s rescheduled to %s (%s).",
-                reminder.external_id,
-                next_dt,
-                reminder.repeat_type,
-            )
+            # Recurring — calculate next occurrence
+            next_dt = RecurrenceService.calculate_next_occurrence(reminder)
+
+            if next_dt is None:
+                # Recurrence ended (end date passed or max occurrences reached)
+                reminder.status = ReminderStatus.COMPLETED
+                reminder.completed_at = timezone.now()
+                logger.info(
+                    "Reminder %s completed (recurrence ended after %d occurrences).",
+                    reminder.external_id,
+                    reminder.occurrence_count,
+                )
+            else:
+                reminder.reminder_datetime = next_dt
+                reminder.reminder_date = next_dt.date()
+                logger.info(
+                    "Reminder %s rescheduled to %s (occurrence #%d, %s).",
+                    reminder.external_id,
+                    next_dt,
+                    reminder.occurrence_count,
+                    reminder.recurrence_summary(),
+                )
 
         reminder.save()
         return reminder
-
-    # ------------------------------------------------------------------
-    # Recurring logic
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def calculate_next_occurrence(
-        current_datetime,
-        repeat_type: str,
-    ):
-        """
-        Calculate the next occurrence based on the repeat type.
-
-        Uses timezone-aware datetimes throughout. Falls back to
-        ``dateutil.relativedelta`` for month/year arithmetic to
-        correctly handle variable-length months and leap years.
-        """
-        now = timezone.now()
-
-        mapping = {
-            RepeatType.HOURLY: lambda dt: dt + timedelta(hours=1),
-            RepeatType.DAILY: lambda dt: dt + timedelta(days=1),
-            RepeatType.WEEKLY: lambda dt: dt + timedelta(weeks=1),
-            RepeatType.MONTHLY: lambda dt: dt + relativedelta(months=1),
-            RepeatType.YEARLY: lambda dt: dt + relativedelta(years=1),
-        }
-
-        advance = mapping.get(repeat_type)
-        if advance is None:
-            raise ValueError(f"Unknown repeat_type: {repeat_type}")
-
-        next_dt = advance(current_datetime)
-
-        # If the calculated next occurrence is still in the past (e.g. the
-        # cron was delayed), keep advancing until it is in the future.
-        while next_dt <= now:
-            next_dt = advance(next_dt)
-
-        return next_dt
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -125,8 +101,14 @@ class ReminderExecutionService:
 
         lines.append(f"\n**Scheduled Time:**\n{scheduled_time}")
 
-        if reminder.repeat_type and reminder.repeat_type != RepeatType.NONE:
-            lines.append(f"\n**Repeats:** {reminder.get_repeat_type_display()}")
+        if reminder.is_recurring:
+            lines.append(f"\n**Repeats:** {reminder.recurrence_summary()}")
+
+            # Show occurrence info
+            if not reminder.repeat_forever and reminder.repeat_end_after:
+                lines.append(
+                    f"**Occurrence:** {reminder.occurrence_count + 1}/{reminder.repeat_end_after}"
+                )
 
         message = "\n".join(lines)
         self.mm.send_reminder_channel_message(message)

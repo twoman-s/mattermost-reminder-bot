@@ -21,7 +21,7 @@ class MattermostService:
     Handles all communication with the Mattermost REST API.
 
     Responsibilities:
-      - Open interactive dialogs
+      - Open interactive dialogs (with dynamic refresh support)
       - Send channel / DM messages
       - Discover bot user information
       - Discover team information
@@ -102,85 +102,337 @@ class MattermostService:
     # Interactive Dialogs
     # ------------------------------------------------------------------
 
-    def open_reminder_dialog(self, trigger_id: str) -> dict:
+    def build_reminder_dialog(
+        self,
+        trigger_id: str,
+        callback_url: str,
+        submission: dict | None = None,
+    ) -> dict:
         """
-        Open the 'Create Reminder' interactive dialog in Mattermost.
+        Build the 'Create Reminder' interactive dialog payload.
 
-        :param trigger_id: The trigger_id provided by Mattermost when the
-                           slash command is invoked. Required by the Dialogs API.
+        If ``submission`` is provided (from a refresh callback), the dialog
+        elements are adjusted dynamically based on the selected repeat_type.
         """
+        current = submission or {}
+        repeat_type = current.get("repeat_type", "none")
+
+        elements = self._build_dialog_elements(repeat_type, current)
+
         dialog_request = {
             "trigger_id": trigger_id,
-            "url": "",  # Will be set by the view before calling
+            "url": callback_url,
             "dialog": {
                 "callback_id": "create_reminder",
                 "title": "Create Reminder",
                 "submit_label": "Save",
-                "elements": [
-                    {
-                        "display_name": "Reminder Title",
-                        "name": "title",
-                        "type": "text",
-                        "placeholder": "e.g. Pay Electricity Bill",
-                        "help_text": "Short title for your reminder.",
-                    },
-                    {
-                        "display_name": "Description",
-                        "name": "description",
-                        "type": "textarea",
-                        "optional": True,
-                        "placeholder": "Optional details…",
-                        "help_text": "Additional notes for the reminder.",
-                    },
-                    {
-                        "display_name": "Reminder Date",
-                        "name": "reminder_date",
-                        "type": "text",
-                        "placeholder": "YYYY-MM-DD",
-                        "help_text": "Date for the reminder (e.g. 2026-06-20).",
-                    },
-                    {
-                        "display_name": "Reminder Time",
-                        "name": "reminder_time",
-                        "type": "text",
-                        "placeholder": "HH:MM (24-hour)",
-                        "help_text": "Time in 24-hour format (e.g. 14:30).",
-                    },
-                    {
-                        "display_name": "Repeat Type",
-                        "name": "repeat_type",
-                        "type": "select",
-                        "default": "none",
-                        "options": [
-                            {"text": "Never", "value": "none"},
-                            {"text": "Hourly", "value": "hourly"},
-                            {"text": "Daily", "value": "daily"},
-                            {"text": "Weekly", "value": "weekly"},
-                            {"text": "Monthly", "value": "monthly"},
-                            {"text": "Yearly", "value": "yearly"},
-                        ],
-                        "help_text": "How often should this reminder repeat?",
-                    },
-                    {
-                        "display_name": "Snooze Minutes",
-                        "name": "snooze_minutes",
-                        "type": "select",
-                        "default": "0",
-                        "optional": True,
-                        "options": [
-                            {"text": "0", "value": "0"},
-                            {"text": "5", "value": "5"},
-                            {"text": "10", "value": "10"},
-                            {"text": "15", "value": "15"},
-                            {"text": "30", "value": "30"},
-                            {"text": "60", "value": "60"},
-                        ],
-                        "help_text": "Snooze duration in minutes after trigger.",
-                    },
-                ],
+                "elements": elements,
             },
         }
         return dialog_request
+
+    def _build_dialog_elements(
+        self, repeat_type: str, current: dict
+    ) -> list[dict]:
+        """
+        Construct the full list of dialog elements, dynamically adding
+        recurrence-specific fields based on the selected repeat_type.
+        """
+        elements: list[dict] = []
+
+        # ---- Core fields ----
+        elements.append({
+            "display_name": "Reminder Title",
+            "name": "title",
+            "type": "text",
+            "default": current.get("title", ""),
+            "placeholder": "e.g. Pay Electricity Bill",
+            "help_text": "Short title for your reminder.",
+        })
+        elements.append({
+            "display_name": "Description",
+            "name": "description",
+            "type": "textarea",
+            "optional": True,
+            "default": current.get("description", ""),
+            "placeholder": "Optional details…",
+            "help_text": "Additional notes for the reminder.",
+        })
+
+        # ---- Date & Time ----
+        elements.append({
+            "display_name": "Reminder Date",
+            "name": "reminder_date",
+            "type": "text",
+            "default": current.get("reminder_date", ""),
+            "placeholder": "YYYY-MM-DD",
+            "help_text": "Date for the reminder (e.g. 2026-06-20).",
+        })
+
+        # Time — hour dropdown
+        elements.append({
+            "display_name": "Hour (24h)",
+            "name": "reminder_hour",
+            "type": "select",
+            "default": current.get("reminder_hour", "09"),
+            "options": [
+                {"text": f"{h:02d}", "value": f"{h:02d}"}
+                for h in range(24)
+            ],
+            "help_text": "Hour in 24-hour format.",
+        })
+        # Time — minute dropdown
+        elements.append({
+            "display_name": "Minute",
+            "name": "reminder_minute",
+            "type": "select",
+            "default": current.get("reminder_minute", "00"),
+            "options": [
+                {"text": f"{m:02d}", "value": f"{m:02d}"}
+                for m in range(0, 60, 5)
+            ],
+            "help_text": "Minute (in 5-minute increments).",
+        })
+
+        # ---- Recurrence Type ----
+        elements.append({
+            "display_name": "Recurrence",
+            "name": "repeat_type",
+            "type": "select",
+            "default": repeat_type,
+            "options": [
+                {"text": "One Time", "value": "none"},
+                {"text": "Interval (every N …)", "value": "interval"},
+                {"text": "Weekly", "value": "weekly"},
+                {"text": "Monthly", "value": "monthly"},
+                {"text": "Yearly", "value": "yearly"},
+            ],
+            "help_text": "How should this reminder repeat?",
+        })
+
+        # ---- Dynamic recurrence fields ----
+        if repeat_type == "interval":
+            elements.extend(self._interval_elements(current))
+        elif repeat_type == "weekly":
+            elements.extend(self._weekly_elements(current))
+        elif repeat_type == "monthly":
+            elements.extend(self._monthly_elements(current))
+        elif repeat_type == "yearly":
+            elements.extend(self._yearly_elements(current))
+
+        # ---- End conditions (only for recurring) ----
+        if repeat_type != "none":
+            elements.extend(self._end_condition_elements(current))
+
+        # ---- Snooze ----
+        elements.append({
+            "display_name": "Snooze Minutes",
+            "name": "snooze_minutes",
+            "type": "select",
+            "default": current.get("snooze_minutes", "0"),
+            "optional": True,
+            "options": [
+                {"text": "0", "value": "0"},
+                {"text": "5", "value": "5"},
+                {"text": "10", "value": "10"},
+                {"text": "15", "value": "15"},
+                {"text": "30", "value": "30"},
+                {"text": "60", "value": "60"},
+            ],
+            "help_text": "Snooze duration in minutes after trigger.",
+        })
+
+        return elements
+
+    # ------------------------------------------------------------------
+    # Dynamic element builders
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _interval_elements(current: dict) -> list[dict]:
+        """Fields for interval-based recurrence."""
+        return [
+            {
+                "display_name": "Every N",
+                "name": "repeat_interval",
+                "type": "text",
+                "subtype": "number",
+                "default": current.get("repeat_interval", "1"),
+                "placeholder": "e.g. 2",
+                "help_text": "Repeat every N units.",
+            },
+            {
+                "display_name": "Unit",
+                "name": "repeat_unit",
+                "type": "select",
+                "default": current.get("repeat_unit", "day"),
+                "options": [
+                    {"text": "Minutes", "value": "minute"},
+                    {"text": "Hours", "value": "hour"},
+                    {"text": "Days", "value": "day"},
+                    {"text": "Weeks", "value": "week"},
+                    {"text": "Months", "value": "month"},
+                    {"text": "Years", "value": "year"},
+                ],
+                "help_text": "Unit of the interval.",
+            },
+        ]
+
+    @staticmethod
+    def _weekly_elements(current: dict) -> list[dict]:
+        """Fields for weekly recurrence."""
+        return [
+            {
+                "display_name": "Weekdays",
+                "name": "repeat_weekdays",
+                "type": "text",
+                "default": current.get("repeat_weekdays", ""),
+                "placeholder": "monday,friday",
+                "help_text": (
+                    "Comma-separated weekday names. "
+                    "Examples: monday | monday,friday | monday,tuesday,wednesday,thursday,friday"
+                ),
+            },
+        ]
+
+    @staticmethod
+    def _monthly_elements(current: dict) -> list[dict]:
+        """Fields for monthly recurrence."""
+        monthly_mode = current.get("monthly_mode", "day_of_month")
+        elements: list[dict] = [
+            {
+                "display_name": "Monthly Mode",
+                "name": "monthly_mode",
+                "type": "select",
+                "default": monthly_mode,
+                "options": [
+                    {"text": "Day of Month (e.g. 15th)", "value": "day_of_month"},
+                    {"text": "Weekday Position (e.g. First Monday)", "value": "weekday_position"},
+                ],
+                "help_text": "How to anchor the monthly recurrence.",
+            },
+        ]
+
+        if monthly_mode == "day_of_month":
+            elements.append({
+                "display_name": "Day of Month",
+                "name": "monthly_day",
+                "type": "text",
+                "subtype": "number",
+                "default": current.get("monthly_day", "1"),
+                "placeholder": "1–31",
+                "help_text": "Day number (1–31). Clamped for short months.",
+            })
+        elif monthly_mode == "weekday_position":
+            elements.append({
+                "display_name": "Week",
+                "name": "monthly_week",
+                "type": "select",
+                "default": current.get("monthly_week", "first"),
+                "options": [
+                    {"text": "First", "value": "first"},
+                    {"text": "Second", "value": "second"},
+                    {"text": "Third", "value": "third"},
+                    {"text": "Fourth", "value": "fourth"},
+                    {"text": "Last", "value": "last"},
+                ],
+                "help_text": "Which occurrence in the month.",
+            })
+            elements.append({
+                "display_name": "Weekday",
+                "name": "monthly_weekday",
+                "type": "select",
+                "default": current.get("monthly_weekday", "monday"),
+                "options": [
+                    {"text": "Monday", "value": "monday"},
+                    {"text": "Tuesday", "value": "tuesday"},
+                    {"text": "Wednesday", "value": "wednesday"},
+                    {"text": "Thursday", "value": "thursday"},
+                    {"text": "Friday", "value": "friday"},
+                    {"text": "Saturday", "value": "saturday"},
+                    {"text": "Sunday", "value": "sunday"},
+                ],
+                "help_text": "Which weekday.",
+            })
+
+        return elements
+
+    @staticmethod
+    def _yearly_elements(current: dict) -> list[dict]:
+        """Fields for yearly recurrence."""
+        return [
+            {
+                "display_name": "Month",
+                "name": "yearly_month",
+                "type": "select",
+                "default": current.get("yearly_month", "1"),
+                "options": [
+                    {"text": "January", "value": "1"},
+                    {"text": "February", "value": "2"},
+                    {"text": "March", "value": "3"},
+                    {"text": "April", "value": "4"},
+                    {"text": "May", "value": "5"},
+                    {"text": "June", "value": "6"},
+                    {"text": "July", "value": "7"},
+                    {"text": "August", "value": "8"},
+                    {"text": "September", "value": "9"},
+                    {"text": "October", "value": "10"},
+                    {"text": "November", "value": "11"},
+                    {"text": "December", "value": "12"},
+                ],
+                "help_text": "Month for the yearly recurrence.",
+            },
+            {
+                "display_name": "Day",
+                "name": "yearly_day",
+                "type": "text",
+                "subtype": "number",
+                "default": current.get("yearly_day", "1"),
+                "placeholder": "1–31",
+                "help_text": "Day of the month.",
+            },
+        ]
+
+    @staticmethod
+    def _end_condition_elements(current: dict) -> list[dict]:
+        """End-condition fields shown for all recurring types."""
+        end_type = current.get("repeat_end_type", "forever")
+        elements: list[dict] = [
+            {
+                "display_name": "Repeat Until",
+                "name": "repeat_end_type",
+                "type": "select",
+                "default": end_type,
+                "options": [
+                    {"text": "Forever", "value": "forever"},
+                    {"text": "End On Date", "value": "end_date"},
+                    {"text": "End After N Occurrences", "value": "end_after"},
+                ],
+                "help_text": "When should the recurrence stop?",
+            },
+        ]
+
+        if end_type == "end_date":
+            elements.append({
+                "display_name": "End Date",
+                "name": "repeat_end_date",
+                "type": "text",
+                "default": current.get("repeat_end_date", ""),
+                "placeholder": "YYYY-MM-DD",
+                "help_text": "Recurrence stops after this date.",
+            })
+        elif end_type == "end_after":
+            elements.append({
+                "display_name": "Number of Occurrences",
+                "name": "repeat_end_after",
+                "type": "text",
+                "subtype": "number",
+                "default": current.get("repeat_end_after", "10"),
+                "placeholder": "e.g. 20",
+                "help_text": "Stop after this many executions.",
+            })
+
+        return elements
 
     def post_open_dialog(self, dialog_request: dict) -> None:
         """Send the dialog open request to the Mattermost API."""
