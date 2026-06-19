@@ -132,7 +132,8 @@ class MattermostService:
                 "default": submission.get("reminder_datetime") or "",
                 "datetime_config": {
                     "min_date": "today",
-                    "time_interval": 15
+                    "time_interval": 15,
+                    "manual_time_entry": True
                 }
             },
             {
