@@ -8,7 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from reminders.models import Reminder, RepeatType, ReminderStatus
-from reminders.services.reminder_service import RecurrenceService, ReminderExecutionService
+from reminders.services import RecurrenceService, ReminderExecutionService
 
 
 class RecurrenceServiceTests(TestCase):
@@ -163,7 +163,7 @@ class ReminderExecutionServiceTests(TestCase):
                 pass
 
         service = ReminderExecutionService(mattermost_service=MockMM())
-        updated_reminder = service.trigger_reminder(reminder)
+        updated_reminder = service.execute(reminder)
 
         self.assertEqual(updated_reminder.status, ReminderStatus.COMPLETED)
         self.assertEqual(updated_reminder.occurrence_count, 1)
@@ -189,7 +189,7 @@ class ReminderExecutionServiceTests(TestCase):
                 pass
 
         service = ReminderExecutionService(mattermost_service=MockMM())
-        updated_reminder = service.trigger_reminder(reminder)
+        updated_reminder = service.execute(reminder)
 
         self.assertEqual(updated_reminder.status, ReminderStatus.COMPLETED)
         self.assertEqual(updated_reminder.occurrence_count, 2)
@@ -216,12 +216,12 @@ class ReminderExecutionServiceTests(TestCase):
         service = ReminderExecutionService(mattermost_service=MockMM())
         
         # First execution -> occurrence_count becomes 1, next_dt becomes 2026-06-20 (<= end_date)
-        updated = service.trigger_reminder(reminder)
+        updated = service.execute(reminder)
         self.assertEqual(updated.status, ReminderStatus.PENDING)
         self.assertEqual(updated.reminder_datetime.date(), date(2026, 6, 20))
 
         # Second execution -> occurrence_count becomes 2, next_dt becomes 2026-06-21 (> end_date)
-        updated = service.trigger_reminder(updated)
+        updated = service.execute(updated)
         self.assertEqual(updated.status, ReminderStatus.COMPLETED)
         self.assertIsNotNone(updated.completed_at)
 
@@ -316,4 +316,44 @@ class SlashListrViewTests(APITestCase):
         self.r1.refresh_from_db()
         self.assertEqual(self.r1.title, "Rem 1 Updated")
         self.assertEqual(self.r1.reminder_datetime, new_dt)
+
+
+from django.core.management import call_command
+
+class ProcessRemindersCommandTests(TestCase):
+    def setUp(self) -> None:
+        self.tz = timezone.get_current_timezone()
+
+    def test_process_reminders_success(self) -> None:
+        # Create a due reminder
+        past_dt = timezone.make_aware(datetime(2026, 6, 19, 10, 0), self.tz)
+        due_reminder = Reminder.objects.create(
+            title="Due Reminder",
+            reminder_datetime=past_dt,
+            next_run_at=past_dt,
+            status=ReminderStatus.PENDING,
+            repeat_type=RepeatType.NONE,
+        )
+
+        # Create a future reminder
+        future_dt = timezone.make_aware(datetime(2026, 6, 25, 10, 0), self.tz)
+        future_reminder = Reminder.objects.create(
+            title="Future Reminder",
+            reminder_datetime=future_dt,
+            next_run_at=future_dt,
+            status=ReminderStatus.PENDING,
+            repeat_type=RepeatType.NONE,
+        )
+
+        from unittest.mock import patch
+        with patch("reminders.services.mattermost.MattermostService.send_reminder_channel_message") as mock_send:
+            call_command("process_reminders")
+            mock_send.assert_called_once()
+
+        due_reminder.refresh_from_db()
+        future_reminder.refresh_from_db()
+
+        self.assertEqual(due_reminder.status, ReminderStatus.COMPLETED)
+        self.assertEqual(future_reminder.status, ReminderStatus.PENDING)
+
 

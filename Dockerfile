@@ -9,6 +9,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    cron \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -17,6 +18,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
+
+# Set permissions for cron script
+RUN chmod +x /app/run_process_reminders.sh
+
+# Configure cron job
+RUN echo "* * * * * root /app/run_process_reminders.sh" > /etc/cron.d/process_reminders && \
+    chmod 0644 /etc/cron.d/process_reminders && \
+    crontab /etc/cron.d/process_reminders
 
 # Create data directory for SQLite
 RUN mkdir -p /app/data

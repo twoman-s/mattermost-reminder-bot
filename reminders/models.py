@@ -148,6 +148,13 @@ class Reminder(models.Model):
         help_text="End recurrence after N occurrences.",
     )
 
+    next_run_at = models.DateTimeField(
+        db_index=True,
+        null=True,
+        blank=True,
+        help_text="Next scheduled execution time.",
+    )
+
     occurrence_count = models.PositiveIntegerField(
         default=0,
         help_text="Count of how many times this reminder has triggered.",
@@ -179,6 +186,11 @@ class Reminder(models.Model):
         ordering = ["reminder_datetime"]
         verbose_name = "Reminder"
         verbose_name_plural = "Reminders"
+
+    def save(self, *args, **kwargs) -> None:
+        if not self.next_run_at:
+            self.next_run_at = self.reminder_datetime
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"[{self.status}] {self.title} — {self.reminder_datetime:%Y-%m-%d %H:%M}"

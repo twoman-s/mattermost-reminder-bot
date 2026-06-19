@@ -1,11 +1,3 @@
-"""
-Views for the reminders app.
-
-Split into three groups:
-  1. REST API views (DRF ViewSets) — consumed by n8n and general clients
-  2. Mattermost webhook views — handle slash commands, dialog refreshes, and submissions
-"""
-
 from __future__ import annotations
 
 import logging
@@ -22,11 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from reminders.models import Reminder, ReminderStatus, RepeatType
-from reminders.serializers import (
-    PendingReminderSerializer,
-    ReminderSerializer,
-    TriggerResponseSerializer,
-)
+from reminders.serializers import ReminderSerializer
 from reminders.services import MattermostService, ReminderExecutionService
 
 logger = logging.getLogger(__name__)
@@ -82,95 +70,6 @@ class ReminderViewSet(viewsets.ModelViewSet):
         response = super().destroy(request, *args, **kwargs)
         logger.info("Reminder deleted via API — external_id: %s", external_id)
         return response
-
-
-# ======================================================================
-# n8n Integration Endpoints
-# ======================================================================
-
-
-class PendingRemindersView(APIView):
-    """
-    GET /api/v1/reminders/pending/
-
-    Returns all reminders that are due (pending + datetime <= now).
-    Consumed by n8n to discover which reminders need triggering.
-    """
-
-    permission_classes = [AllowAny]
-
-    @extend_schema(
-        tags=["n8n Integration"],
-        summary="Get due reminders",
-        description="Return all pending reminders whose reminder_datetime is in the past or now.",
-        responses={200: PendingReminderSerializer(many=True)},
-    )
-    def get(self, request: Request) -> Response:
-        now = timezone.now()
-        reminders = Reminder.objects.filter(
-            status=ReminderStatus.PENDING,
-            reminder_datetime__lte=now,
-        )
-        serializer = PendingReminderSerializer(reminders, many=True)
-        logger.info("Pending reminders query — found %d due (as of %s).", reminders.count(), now)
-        return Response(serializer.data)
-
-
-class TriggerReminderView(APIView):
-    """
-    POST /api/v1/reminders/<external_id>/trigger/
-
-    Called by n8n to fire a specific reminder.
-    All Mattermost communication happens inside Django — n8n never
-    talks to Mattermost directly.
-    """
-
-    permission_classes = [AllowAny]
-
-    @extend_schema(
-        tags=["n8n Integration"],
-        summary="Trigger a reminder",
-        description=(
-            "Send the reminder message to Mattermost, update its state, "
-            "and reschedule if recurring."
-        ),
-        responses={
-            200: TriggerResponseSerializer,
-            404: OpenApiResponse(description="Reminder not found."),
-        },
-    )
-    def post(self, request: Request, external_id: str) -> Response:
-        logger.info("Trigger requested — external_id: %s", external_id)
-        try:
-            reminder = Reminder.objects.get(
-                external_id=external_id,
-                status=ReminderStatus.PENDING,
-            )
-        except Reminder.DoesNotExist:
-            logger.warning("Trigger failed — reminder %s not found or not pending.", external_id)
-            return Response(
-                {"detail": "Reminder not found or not pending."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        service = ReminderExecutionService()
-        try:
-            reminder = service.trigger_reminder(reminder)
-        except Exception:
-            logger.error("Trigger execution failed — external_id: %s", external_id, exc_info=True)
-            return Response(
-                {"detail": "Failed to trigger reminder."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        logger.info(
-            "Trigger complete — external_id: %s, new_status: %s, next_datetime: %s",
-            reminder.external_id,
-            reminder.status,
-            reminder.reminder_datetime,
-        )
-        serializer = TriggerResponseSerializer(reminder)
-        return Response(serializer.data)
 
 
 # ======================================================================
@@ -606,6 +505,7 @@ class DialogSubmitView(APIView):
             target_reminder.title = title
             target_reminder.description = description
             target_reminder.reminder_datetime = reminder_dt
+            target_reminder.next_run_at = reminder_dt
             target_reminder.repeat_type = repeat_type
             target_reminder.repeat_interval = repeat_interval
             target_reminder.repeat_unit = repeat_unit

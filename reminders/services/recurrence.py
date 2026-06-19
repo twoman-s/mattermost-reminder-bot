@@ -1,20 +1,15 @@
 """
-Service for executing reminders and managing recurring schedules.
+Service for calculating recurrence dates and rules.
 """
 
 from __future__ import annotations
 
 import calendar
-import logging
 from datetime import datetime, timedelta
 
 from dateutil.relativedelta import relativedelta
-from django.utils import timezone
 
-from reminders.models import Reminder, ReminderStatus, RepeatType
-from reminders.services.mattermost_service import MattermostService
-
-logger = logging.getLogger(__name__)
+from reminders.models import Reminder, RepeatType
 
 
 def weekday_to_int(weekday_name: str) -> int:
@@ -72,7 +67,7 @@ class RecurrenceService:
     @staticmethod
     def calculate_next_occurrence(reminder: Reminder) -> datetime | None:
         """
-        Calculate the next scheduled datetime for the reminder.
+        Calculate the next scheduled datetime for the reminder based on its settings.
         Returns None if the recurrence has ended.
         """
         if reminder.repeat_type == RepeatType.NONE:
@@ -146,108 +141,3 @@ class RecurrenceService:
             raise ValueError(f"Invalid repeat_type: {reminder.repeat_type}")
 
         return next_dt
-
-
-class ReminderExecutionService:
-    """
-    Handles reminder delivery and lifecycle management.
-    """
-
-    def __init__(self, mattermost_service: MattermostService | None = None) -> None:
-        self.mm = mattermost_service or MattermostService()
-
-    def trigger_reminder(self, reminder: Reminder) -> Reminder:
-        """
-        Execute a single reminder:
-          1. Send the Mattermost message
-          2. Update last_triggered_at
-          3. Increment occurrence_count
-          4. Check recurrence end conditions and reschedule
-        """
-        # 1. Send Mattermost message
-        self._send_reminder_message(reminder)
-
-        # 2. Update last_triggered_at
-        reminder.last_triggered_at = timezone.now()
-
-        # 3. Increment occurrence_count
-        reminder.occurrence_count += 1
-
-        # 4. Check recurrence end conditions
-        if reminder.repeat_type == RepeatType.NONE:
-            # One-time reminder
-            reminder.status = ReminderStatus.COMPLETED
-            reminder.completed_at = timezone.now()
-            logger.info("Reminder %s completed (one-off).", reminder.external_id)
-        else:
-            # Check occurrence limit before calculating next occurrence
-            if not reminder.repeat_forever and reminder.repeat_end_after is not None:
-                if reminder.occurrence_count >= reminder.repeat_end_after:
-                    reminder.status = ReminderStatus.COMPLETED
-                    reminder.completed_at = timezone.now()
-                    logger.info(
-                        "Reminder %s completed (reached end occurrence count %d).",
-                        reminder.external_id,
-                        reminder.repeat_end_after,
-                    )
-                    reminder.save()
-                    return reminder
-
-            # Calculate next occurrence
-            next_dt = RecurrenceService.calculate_next_occurrence(reminder)
-
-            if next_dt is None:
-                reminder.status = ReminderStatus.COMPLETED
-                reminder.completed_at = timezone.now()
-                logger.info("Reminder %s completed (no next occurrence).", reminder.external_id)
-            else:
-                # Check end date limit
-                if not reminder.repeat_forever and reminder.repeat_end_date is not None:
-                    if next_dt.date() > reminder.repeat_end_date:
-                        reminder.status = ReminderStatus.COMPLETED
-                        reminder.completed_at = timezone.now()
-                        logger.info(
-                            "Reminder %s completed (next occurrence %s is past end date %s).",
-                            reminder.external_id,
-                            next_dt,
-                            reminder.repeat_end_date,
-                        )
-                        reminder.save()
-                        return reminder
-
-                # Reschedule
-                reminder.reminder_datetime = next_dt
-                reminder.status = ReminderStatus.PENDING
-                logger.info(
-                    "Reminder %s rescheduled to %s (occurrence #%d).",
-                    reminder.external_id,
-                    next_dt,
-                    reminder.occurrence_count,
-                )
-
-        reminder.save()
-        return reminder
-
-    def _send_reminder_message(self, reminder: Reminder) -> None:
-        """Format and send the reminder notification to Mattermost."""
-        scheduled_time = reminder.reminder_datetime.strftime("%Y-%m-%d %H:%M")
-
-        lines = [
-            "⏰ **Reminder**",
-            "",
-            f"**Title:**\n{reminder.title}",
-        ]
-        if reminder.description:
-            lines.append(f"\n**Description:**\n{reminder.description}")
-
-        if reminder.mattermost_user_id:
-            lines.append(f"\n**Created By:** {reminder.mattermost_user_id}")
-
-        lines.append(f"\n**Scheduled Time:**\n{scheduled_time}")
-
-        if reminder.repeat_type and reminder.repeat_type != RepeatType.NONE:
-            lines.append(f"\n**Repeats:** {reminder.get_repeat_type_display()}")
-            lines.append(f"**Occurrence:** #{reminder.occurrence_count + 1}")
-
-        message = "\n".join(lines)
-        self.mm.send_reminder_channel_message(message)

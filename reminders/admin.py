@@ -16,6 +16,7 @@ class ReminderAdmin(admin.ModelAdmin):
         "status",
         "repeat_type",
         "reminder_datetime",
+        "next_run_at",
         "occurrence_count",
         "last_triggered_at",
         "created_at",
@@ -33,6 +34,7 @@ class ReminderAdmin(admin.ModelAdmin):
     ordering = ["reminder_datetime"]
     readonly_fields = [
         "external_id",
+        "next_run_at",
         "occurrence_count",
         "last_triggered_at",
         "created_at",

@@ -11,11 +11,9 @@ from rest_framework.routers import DefaultRouter
 from reminders.views import (
     DialogRefreshView,
     DialogSubmitView,
-    PendingRemindersView,
     ReminderViewSet,
     SlashListrView,
     SlashRemindView,
-    TriggerReminderView,
 )
 
 # DRF router for CRUD
@@ -23,13 +21,6 @@ router = DefaultRouter()
 router.register(r"reminders", ReminderViewSet, basename="reminder")
 
 urlpatterns = [
-    # n8n integration endpoints — must come BEFORE the router
-    path("api/v1/reminders/pending/", PendingRemindersView.as_view(), name="reminders-pending"),
-    path(
-        "api/v1/reminders/<uuid:external_id>/trigger/",
-        TriggerReminderView.as_view(),
-        name="reminders-trigger",
-    ),
     # REST API — CRUD (router)
     path("api/v1/", include(router.urls)),
     # Mattermost webhooks

@@ -20,6 +20,7 @@ class ReminderSerializer(serializers.ModelSerializer):
             "title",
             "description",
             "reminder_datetime",
+            "next_run_at",
             "repeat_type",
             "repeat_interval",
             "repeat_unit",
@@ -42,6 +43,7 @@ class ReminderSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "external_id",
+            "next_run_at",
             "occurrence_count",
             "last_triggered_at",
             "created_at",
@@ -49,33 +51,3 @@ class ReminderSerializer(serializers.ModelSerializer):
             "completed_at",
         ]
 
-
-class PendingReminderSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for the n8n polling endpoint."""
-
-    class Meta:
-        model = Reminder
-        fields = [
-            "external_id",
-            "title",
-            "description",
-            "reminder_datetime",
-            "repeat_type",
-        ]
-
-
-class TriggerResponseSerializer(serializers.ModelSerializer):
-    """Serializer returned after a reminder is triggered."""
-
-    class Meta:
-        model = Reminder
-        fields = [
-            "external_id",
-            "title",
-            "status",
-            "reminder_datetime",
-            "repeat_type",
-            "occurrence_count",
-            "last_triggered_at",
-            "completed_at",
-        ]

@@ -2,10 +2,12 @@
 Services package for the reminders app.
 """
 
-from reminders.services.mattermost_service import MattermostService
-from reminders.services.reminder_service import ReminderExecutionService
+from reminders.services.mattermost import MattermostService
+from reminders.services.recurrence import RecurrenceService
+from reminders.services.execution import ReminderExecutionService
 
 __all__ = [
     "MattermostService",
+    "RecurrenceService",
     "ReminderExecutionService",
 ]
