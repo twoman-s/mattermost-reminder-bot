@@ -13,6 +13,8 @@ from typing import Any
 import requests
 from django.conf import settings
 
+from reminders.models import Reminder
+
 logger = logging.getLogger(__name__)
 
 
@@ -313,6 +315,171 @@ class MattermostService:
                 })
 
         return elements
+
+    def build_list_dialog(self, submission: dict) -> dict:
+        """
+        Build the list dialog with pagination and edit selection.
+        """
+        page_num = 1
+        try:
+            page_num = int(submission.get("page") or 1)
+        except ValueError:
+            pass
+
+        page_size = 15
+        try:
+            page_size = int(submission.get("page_size") or 15)
+        except ValueError:
+            pass
+
+        pagination_action = submission.get("pagination_action") or "current"
+        if pagination_action == "prev":
+            page_num = max(1, page_num - 1)
+        elif pagination_action == "next":
+            page_num = page_num + 1
+
+        reminders_qs = Reminder.objects.all().order_by("reminder_datetime")
+        total_count = reminders_qs.count()
+
+        from django.core.paginator import Paginator
+        paginator = Paginator(reminders_qs, page_size)
+
+        if page_num > paginator.num_pages:
+            page_num = paginator.num_pages
+        if page_num < 1:
+            page_num = 1
+
+        page_obj = paginator.get_page(page_num) if total_count > 0 else []
+
+        # Build table
+        if total_count > 0:
+            table_lines = [
+                "### Reminders List",
+                "",
+                "| Title | When | Repeats |",
+                "| :--- | :--- | :--- |"
+            ]
+            for r in page_obj:
+                when_str = r.reminder_datetime.strftime("%Y-%m-%d %H:%M")
+                repeats_str = r.get_repeat_type_display()
+                title_escaped = r.title.replace("|", "\\|")
+                table_lines.append(f"| {title_escaped} | {when_str} | {repeats_str} |")
+            markdown_table = "\n".join(table_lines)
+        else:
+            markdown_table = "### Reminders List\n\nNo reminders found."
+
+        # Page options
+        page_options = []
+        num_pages = paginator.num_pages if total_count > 0 else 1
+        for p in range(1, num_pages + 1):
+            page_options.append({"text": f"Page {p}", "value": str(p)})
+
+        # Page size options (5 to 50, step 5)
+        page_size_options = []
+        for sz in range(5, 51, 5):
+            page_size_options.append({"text": f"{sz} items", "value": str(sz)})
+
+        # Reminder options to edit
+        edit_options = []
+        if total_count > 0:
+            for r in page_obj:
+                edit_options.append({"text": r.title[:30], "value": str(r.external_id)})
+        else:
+            edit_options.append({"text": "No reminders to edit", "value": "none"})
+
+        elements = [
+            {
+                "display_name": "Page Size",
+                "name": "page_size",
+                "type": "select",
+                "default": str(page_size),
+                "refresh": True,
+                "options": page_size_options,
+            },
+            {
+                "display_name": "Select Page",
+                "name": "page",
+                "type": "select",
+                "default": str(page_num),
+                "refresh": True,
+                "options": page_options,
+            },
+            {
+                "display_name": "Pagination Actions",
+                "name": "pagination_action",
+                "type": "select",
+                "default": "current",
+                "refresh": True,
+                "options": [
+                    {"text": "Stay on Current Page", "value": "current"},
+                    {"text": "◄ Previous Page", "value": "prev"},
+                    {"text": "Next Page ►", "value": "next"},
+                ],
+            }
+        ]
+
+        if total_count > 0:
+            elements.append({
+                "display_name": "Select Reminder to Edit",
+                "name": "reminder_to_edit",
+                "type": "select",
+                "default": submission.get("reminder_to_edit") or "",
+                "options": edit_options,
+                "optional": True,
+                "help_text": "Select a reminder and click Edit below.",
+            })
+
+        dialog = {
+            "callback_id": "list_reminders",
+            "title": f"Manage Reminders ({total_count} total)",
+            "submit_label": "Edit",
+            "introduction_text": markdown_table,
+            "elements": elements,
+        }
+        return dialog
+
+    def build_edit_dialog(self, reminder: Reminder, submission: dict | None = None) -> dict:
+        """
+        Build the edit dialog for a specific reminder.
+        """
+        if submission is None:
+            end_date_str = ""
+            if reminder.repeat_end_date:
+                end_date_str = reminder.repeat_end_date.strftime("%Y-%m-%d")
+
+            repeat_until = "forever"
+            if not reminder.repeat_forever:
+                if reminder.repeat_end_date:
+                    repeat_until = "end_date"
+                elif reminder.repeat_end_after:
+                    repeat_until = "end_after"
+
+            submission = {
+                "title": reminder.title,
+                "description": reminder.description,
+                "reminder_datetime": reminder.reminder_datetime.isoformat(),
+                "repeat_type": reminder.repeat_type,
+                "repeat_interval": str(reminder.repeat_interval),
+                "repeat_unit": reminder.repeat_unit,
+                "repeat_weekdays": ",".join(reminder.repeat_weekdays),
+                "monthly_mode": reminder.monthly_mode,
+                "monthly_day": str(reminder.monthly_day or 15),
+                "monthly_week": reminder.monthly_week,
+                "monthly_weekday": reminder.monthly_weekday,
+                "yearly_month": str(reminder.yearly_month or 1),
+                "yearly_day": str(reminder.yearly_day or 1),
+                "repeat_until": repeat_until,
+                "repeat_end_date": end_date_str,
+                "repeat_end_after": str(reminder.repeat_end_after or 10),
+            }
+
+        dialog = {
+            "callback_id": f"edit_reminder_{reminder.external_id}",
+            "title": "Edit Reminder",
+            "submit_label": "Save Changes",
+            "elements": self.build_dialog_elements(submission),
+        }
+        return dialog
 
     def open_reminder_dialog(
         self,

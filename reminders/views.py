@@ -242,11 +242,93 @@ class SlashRemindView(APIView):
         return Response(status=status.HTTP_200_OK)
 
 
+class SlashListrView(APIView):
+    """
+    GET /mattermost/slash/listr/ — Returns all reminders paginated.
+    POST /mattermost/slash/listr/ — Opens interactive dialog to show paginated reminders.
+    """
+
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        tags=["Mattermost"],
+        summary="Handle /listr command (GET or POST)",
+        description="GET returns paginated reminders as JSON. POST opens the list dialog in Mattermost.",
+        responses={200: OpenApiResponse(description="Paginated JSON list or empty 200.")},
+    )
+    def get(self, request: Request) -> Response:
+        page_num = 1
+        try:
+            page_num = int(request.query_params.get("page") or 1)
+        except ValueError:
+            pass
+
+        page_size = 15
+        try:
+            page_size = int(request.query_params.get("page_size") or 15)
+        except ValueError:
+            pass
+
+        reminders_qs = Reminder.objects.all().order_by("reminder_datetime")
+        from django.core.paginator import Paginator
+        paginator = Paginator(reminders_qs, page_size)
+
+        if page_num > paginator.num_pages:
+            page_num = paginator.num_pages
+        if page_num < 1:
+            page_num = 1
+
+        page_obj = paginator.get_page(page_num)
+        serializer = ReminderSerializer(page_obj, many=True)
+
+        return Response({
+            "count": paginator.count,
+            "num_pages": paginator.num_pages,
+            "current_page": page_num,
+            "results": serializer.data
+        }, status=status.HTTP_200_OK)
+
+    def post(self, request: Request) -> Response:
+        trigger_id: str = request.data.get("trigger_id", "")
+        user_id: str = request.data.get("user_id", "unknown")
+
+        logger.info("Slash /listr received — trigger_id: %s, user: %s", trigger_id, user_id)
+
+        if not trigger_id:
+            return Response(
+                {"text": "Missing trigger_id."},
+                status=status.HTTP_200_OK,
+            )
+
+        callback_url = request.build_absolute_uri("/nudgy/mattermost/dialog/submit/")
+        refresh_url = request.build_absolute_uri("/nudgy/mattermost/dialog/refresh/")
+
+        mm_service = MattermostService()
+        dialog_data = mm_service.build_list_dialog(submission={})
+
+        dialog_request = {
+            "trigger_id": trigger_id,
+            "url": callback_url,
+            "dialog": dialog_data,
+        }
+
+        try:
+            mm_service.post_open_dialog(dialog_request)
+        except Exception:
+            logger.error("Failed to open list dialog", exc_info=True)
+            return Response(
+                {"text": "Failed to open list dialog."},
+                status=status.HTTP_200_OK,
+            )
+
+        return Response(status=status.HTTP_200_OK)
+
+
 class DialogRefreshView(APIView):
     """
     POST /mattermost/dialog/refresh/
 
-    Handles dynamic updates as the user configures recurrence settings.
+    Handles dynamic updates as the user configures recurrence settings or pages through reminders.
     Inspects current values and returns the new set of elements.
     """
 
@@ -261,23 +343,52 @@ class DialogRefreshView(APIView):
     def post(self, request: Request) -> Response:
         payload = request.data
         submission: dict = payload.get("submission", {})
-        logger.info("Dialog refresh request received. Submission: %s", submission)
+        callback_id: str = payload.get("callback_id", "")
+        logger.info("Dialog refresh received. Callback: %s, Submission: %s", callback_id, submission)
 
         refresh_url = request.build_absolute_uri("/nudgy/mattermost/dialog/refresh/")
-
         mm_service = MattermostService()
-        elements = mm_service.build_dialog_elements(submission)
 
-        return Response({
-            "type": "form",
-            "form": {
-                "callback_id": "create_reminder",
-                "title": "Create Reminder",
-                "submit_label": "Save",
-                "source_url": refresh_url,
-                "elements": elements,
-            }
-        }, status=status.HTTP_200_OK)
+        if callback_id == "list_reminders":
+            dialog_data = mm_service.build_list_dialog(submission)
+            return Response({
+                "type": "form",
+                "form": {
+                    "callback_id": "list_reminders",
+                    "title": dialog_data["title"],
+                    "submit_label": dialog_data["submit_label"],
+                    "introduction_text": dialog_data["introduction_text"],
+                    "source_url": refresh_url,
+                    "elements": dialog_data["elements"],
+                }
+            }, status=status.HTTP_200_OK)
+
+        elif callback_id.startswith("edit_reminder_"):
+            elements = mm_service.build_dialog_elements(submission)
+            return Response({
+                "type": "form",
+                "form": {
+                    "callback_id": callback_id,
+                    "title": "Edit Reminder",
+                    "submit_label": "Save Changes",
+                    "source_url": refresh_url,
+                    "elements": elements,
+                }
+            }, status=status.HTTP_200_OK)
+
+        else:
+            # Default to create reminder dialog refresh
+            elements = mm_service.build_dialog_elements(submission)
+            return Response({
+                "type": "form",
+                "form": {
+                    "callback_id": "create_reminder",
+                    "title": "Create Reminder",
+                    "submit_label": "Save",
+                    "source_url": refresh_url,
+                    "elements": elements,
+                }
+            }, status=status.HTTP_200_OK)
 
 
 class DialogSubmitView(APIView):
@@ -285,7 +396,7 @@ class DialogSubmitView(APIView):
     POST /mattermost/dialog/submit/
 
     Receives the Interactive Dialog submission from Mattermost,
-    validates input, creates the Reminder, and sends a confirmation
+    validates input, creates or updates the Reminder, and sends a confirmation
     message back to the user's channel.
     """
 
@@ -294,21 +405,66 @@ class DialogSubmitView(APIView):
     @extend_schema(
         tags=["Mattermost"],
         summary="Handle dialog submission",
-        description="Validates and saves a new reminder from the Mattermost dialog.",
-        responses={200: OpenApiResponse(description="Confirmation or validation errors.")},
+        description="Validates and saves a new or updated reminder from the Mattermost dialog.",
+        responses={200: OpenApiResponse(description="Confirmation, validation errors, or new form.")},
     )
     def post(self, request: Request) -> Response:
         payload = request.data
         submission: dict = payload.get("submission", {})
+        callback_id: str = payload.get("callback_id", "")
         user_id: str = payload.get("user_id", "")
         channel_id: str = payload.get("channel_id", "")
 
         logger.info(
-            "Dialog submission received — user: %s, channel: %s, submission: %s",
+            "Dialog submission received — callback_id: %s, user: %s, channel: %s, submission: %s",
+            callback_id,
             user_id,
             channel_id,
             submission,
         )
+
+        refresh_url = request.build_absolute_uri("/nudgy/mattermost/dialog/refresh/")
+        mm_service = MattermostService()
+
+        # --- CASE 1: List reminders dialog submitted ---
+        if callback_id == "list_reminders":
+            reminder_to_edit = submission.get("reminder_to_edit")
+            if not reminder_to_edit or reminder_to_edit == "none":
+                logger.info("List dialog submitted with no reminder selected to edit. Closing dialog.")
+                return Response(status=status.HTTP_200_OK)
+
+            try:
+                reminder = Reminder.objects.get(external_id=reminder_to_edit)
+            except Reminder.DoesNotExist:
+                logger.warning("Selected reminder %s to edit does not exist.", reminder_to_edit)
+                return Response({
+                    "errors": {"reminder_to_edit": "Selected reminder no longer exists."}
+                }, status=status.HTTP_200_OK)
+
+            # Build and return the edit form structure immediately
+            logger.info("Chaining edit dialog form for reminder %s.", reminder.external_id)
+            edit_dialog = mm_service.build_edit_dialog(reminder=reminder)
+            return Response({
+                "type": "form",
+                "form": {
+                    "callback_id": edit_dialog["callback_id"],
+                    "title": edit_dialog["title"],
+                    "submit_label": edit_dialog["submit_label"],
+                    "source_url": refresh_url,
+                    "elements": edit_dialog["elements"],
+                }
+            }, status=status.HTTP_200_OK)
+
+        # --- CASE 2: Create or Edit dialog submitted ---
+        is_edit = callback_id.startswith("edit_reminder_")
+        target_reminder = None
+
+        if is_edit:
+            external_id = callback_id.replace("edit_reminder_", "")
+            try:
+                target_reminder = Reminder.objects.get(external_id=external_id)
+            except Reminder.DoesNotExist:
+                return Response({"errors": {"title": "Reminder being edited no longer exists."}}, status=status.HTTP_200_OK)
 
         errors: dict[str, str] = {}
 
@@ -324,15 +480,13 @@ class DialogSubmitView(APIView):
             errors["reminder_datetime"] = "Reminder time is required."
         else:
             try:
-                # Mattermost sends ISO/RFC3339 string (e.g. 2024-03-15T14:30:00-05:00)
                 reminder_dt = dateutil.parser.parse(dt_str)
-                # Convert naive to aware just in case (though it should be aware)
                 if timezone.is_naive(reminder_dt):
                     reminder_dt = timezone.make_aware(reminder_dt, timezone.get_current_timezone())
 
-                # Prevent past dates
+                # Prevent past dates only for new reminders, or if datetime was changed to past
                 now = timezone.now()
-                if reminder_dt < now:
+                if (not is_edit or (target_reminder and target_reminder.reminder_datetime != reminder_dt)) and reminder_dt < now:
                     errors["reminder_datetime"] = "Reminder time cannot be in the past."
             except Exception:
                 errors["reminder_datetime"] = "Invalid date/time format."
@@ -447,58 +601,72 @@ class DialogSubmitView(APIView):
             logger.warning("Dialog validation failed — user: %s, errors: %s", user_id, errors)
             return Response({"errors": errors}, status=status.HTTP_200_OK)
 
-        # Create the reminder
-        reminder = Reminder.objects.create(
-            mattermost_user_id=user_id,
-            title=title,
-            description=description,
-            reminder_datetime=reminder_dt,
-            repeat_type=repeat_type,
-            repeat_interval=repeat_interval,
-            repeat_unit=repeat_unit,
-            repeat_weekdays=repeat_weekdays,
-            monthly_mode=monthly_mode,
-            monthly_day=monthly_day,
-            monthly_week=monthly_week,
-            monthly_weekday=monthly_weekday,
-            yearly_month=yearly_month,
-            yearly_day=yearly_day,
-            repeat_forever=repeat_forever,
-            repeat_end_date=repeat_end_date,
-            repeat_end_after=repeat_end_after,
-        )
+        if is_edit and target_reminder:
+            # Update existing reminder
+            target_reminder.title = title
+            target_reminder.description = description
+            target_reminder.reminder_datetime = reminder_dt
+            target_reminder.repeat_type = repeat_type
+            target_reminder.repeat_interval = repeat_interval
+            target_reminder.repeat_unit = repeat_unit
+            target_reminder.repeat_weekdays = repeat_weekdays
+            target_reminder.monthly_mode = monthly_mode
+            target_reminder.monthly_day = monthly_day
+            target_reminder.monthly_week = monthly_week
+            target_reminder.monthly_weekday = monthly_weekday
+            target_reminder.yearly_month = yearly_month
+            target_reminder.yearly_day = yearly_day
+            target_reminder.repeat_forever = repeat_forever
+            target_reminder.repeat_end_date = repeat_end_date
+            target_reminder.repeat_end_after = repeat_end_after
+            target_reminder.save()
 
-        logger.info(
-            "Reminder created from dialog — external_id: %s, title: '%s', "
-            "datetime: %s, repeat: %s, user: %s",
-            reminder.external_id,
-            reminder.title,
-            reminder.reminder_datetime,
-            reminder.repeat_type,
-            user_id,
-        )
+            logger.info("Reminder %s updated from edit dialog.", target_reminder.external_id)
+
+            confirmation = (
+                f"📝 **Reminder updated successfully.**\n\n"
+                f"**Title:** {target_reminder.title}\n"
+                f"**When:** {target_reminder.reminder_datetime:%Y-%m-%d %H:%M}\n"
+                f"**Repeats:** {target_reminder.get_repeat_type_display()}"
+            )
+        else:
+            # Create a new reminder
+            reminder = Reminder.objects.create(
+                mattermost_user_id=user_id,
+                title=title,
+                description=description,
+                reminder_datetime=reminder_dt,
+                repeat_type=repeat_type,
+                repeat_interval=repeat_interval,
+                repeat_unit=repeat_unit,
+                repeat_weekdays=repeat_weekdays,
+                monthly_mode=monthly_mode,
+                monthly_day=monthly_day,
+                monthly_week=monthly_week,
+                monthly_weekday=monthly_weekday,
+                yearly_month=yearly_month,
+                yearly_day=yearly_day,
+                repeat_forever=repeat_forever,
+                repeat_end_date=repeat_end_date,
+                repeat_end_after=repeat_end_after,
+            )
+
+            logger.info("Reminder %s created from dialog.", reminder.external_id)
+
+            confirmation = (
+                f"✅ **Reminder saved successfully.**\n\n"
+                f"**Title:** {reminder.title}\n"
+                f"**When:** {reminder.reminder_datetime:%Y-%m-%d %H:%M}\n"
+                f"**Repeats:** {reminder.get_repeat_type_display()}"
+            )
 
         # Send confirmation message
-        mm_service = MattermostService()
-        confirmation = (
-            f"✅ **Reminder saved successfully.**\n\n"
-            f"**Title:** {reminder.title}\n"
-            f"**When:** {reminder.reminder_datetime:%Y-%m-%d %H:%M}\n"
-            f"**Repeats:** {reminder.get_repeat_type_display()}"
-        )
-
         try:
             if channel_id:
                 mm_service.send_channel_message(channel_id, confirmation)
             else:
                 mm_service.send_reminder_channel_message(confirmation)
-            logger.info("Confirmation message sent to channel %s.", channel_id or "(default)")
         except Exception:
-            logger.error(
-                "Failed to send confirmation — external_id: %s, channel: %s",
-                reminder.external_id,
-                channel_id,
-                exc_info=True,
-            )
+            logger.error("Failed to send confirmation message.", exc_info=True)
 
         return Response(status=status.HTTP_200_OK)

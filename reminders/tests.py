@@ -4,6 +4,7 @@ Unit tests for Reminder models and services.
 
 from datetime import date, datetime
 from django.test import TestCase
+from django.urls import reverse
 from django.utils import timezone
 
 from reminders.models import Reminder, RepeatType, ReminderStatus
@@ -223,3 +224,96 @@ class ReminderExecutionServiceTests(TestCase):
         updated = service.trigger_reminder(updated)
         self.assertEqual(updated.status, ReminderStatus.COMPLETED)
         self.assertIsNotNone(updated.completed_at)
+
+
+from rest_framework.test import APITestCase
+
+class SlashListrViewTests(APITestCase):
+    """Test suite for /listr slash command endpoint and interactive dialog flows."""
+
+    def setUp(self) -> None:
+        self.tz = timezone.get_current_timezone()
+        # Create a couple of reminders
+        self.r1 = Reminder.objects.create(
+            title="Rem 1",
+            reminder_datetime=timezone.make_aware(datetime(2026, 6, 20, 10, 0), self.tz),
+            repeat_type=RepeatType.NONE,
+        )
+        self.r2 = Reminder.objects.create(
+            title="Rem 2",
+            reminder_datetime=timezone.make_aware(datetime(2026, 6, 21, 10, 0), self.tz),
+            repeat_type=RepeatType.NONE,
+        )
+
+    def test_listr_get_paginated(self) -> None:
+        url = reverse("mattermost-slash-listr")
+        resp = self.client.get(url, {"page": 1, "page_size": 1})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["count"], 2)
+        self.assertEqual(resp.data["num_pages"], 2)
+        self.assertEqual(len(resp.data["results"]), 1)
+        self.assertEqual(resp.data["results"][0]["title"], "Rem 1")
+
+    def test_listr_post_slash_command(self) -> None:
+        url = reverse("mattermost-slash-listr")
+        # Mock MM post open dialog to prevent actual post calls
+        from unittest.mock import patch
+        with patch("reminders.services.MattermostService.post_open_dialog") as mock_open:
+            resp = self.client.post(url, {
+                "trigger_id": "test_trig_id",
+                "user_id": "user_id_123",
+                "channel_id": "channel_id_456"
+            })
+            self.assertEqual(resp.status_code, 200)
+            mock_open.assert_called_once()
+
+    def test_dialog_refresh_list(self) -> None:
+        url = reverse("mattermost-dialog-refresh")
+        resp = self.client.post(url, {
+            "callback_id": "list_reminders",
+            "submission": {
+                "page": "1",
+                "page_size": "1",
+                "pagination_action": "next"
+            }
+        }, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["type"], "form")
+        # Because we moved next, page should be updated to 2
+        elements = resp.data["form"]["elements"]
+        page_elem = next(el for el in elements if el["name"] == "page")
+        self.assertEqual(page_elem["default"], "2")
+
+    def test_dialog_submit_edit_chained_form(self) -> None:
+        url = reverse("mattermost-dialog-submit")
+        # Submit the list dialog selecting r1 to edit
+        resp = self.client.post(url, {
+            "callback_id": "list_reminders",
+            "submission": {
+                "reminder_to_edit": str(self.r1.external_id)
+            }
+        }, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["type"], "form")
+        self.assertEqual(resp.data["form"]["callback_id"], f"edit_reminder_{self.r1.external_id}")
+        self.assertEqual(resp.data["form"]["submit_label"], "Save Changes")
+
+    def test_dialog_submit_save_edit(self) -> None:
+        url = reverse("mattermost-dialog-submit")
+        # Save updates to r1
+        new_dt = timezone.make_aware(datetime(2026, 6, 25, 12, 0), self.tz)
+        resp = self.client.post(url, {
+            "callback_id": f"edit_reminder_{self.r1.external_id}",
+            "submission": {
+                "title": "Rem 1 Updated",
+                "reminder_datetime": new_dt.isoformat(),
+                "repeat_type": "none",
+            }
+        }, format="json")
+        self.assertEqual(resp.status_code, 200)
+        
+        # Check if DB was updated
+        self.r1.refresh_from_db()
+        self.assertEqual(self.r1.title, "Rem 1 Updated")
+        self.assertEqual(self.r1.reminder_datetime, new_dt)
+
