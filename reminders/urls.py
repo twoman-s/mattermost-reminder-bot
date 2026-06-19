@@ -13,7 +13,6 @@ from reminders.views import (
     DialogSubmitView,
     PendingRemindersView,
     ReminderViewSet,
-    SlashListRemindersView,
     SlashRemindView,
     TriggerReminderView,
 )
@@ -34,7 +33,6 @@ urlpatterns = [
     path("api/v1/", include(router.urls)),
     # Mattermost webhooks
     path("mattermost/slash/remind/", SlashRemindView.as_view(), name="mattermost-slash-remind"),
-    path("mattermost/slash/listr/", SlashListRemindersView.as_view(), name="mattermost-slash-listr"),
     path("mattermost/dialog/submit/", DialogSubmitView.as_view(), name="mattermost-dialog-submit"),
     path("mattermost/dialog/refresh/", DialogRefreshView.as_view(), name="mattermost-dialog-refresh"),
 ]

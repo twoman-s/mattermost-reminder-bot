@@ -3,7 +3,7 @@ Views for the reminders app.
 
 Split into three groups:
   1. REST API views (DRF ViewSets) — consumed by n8n and general clients
-  2. Mattermost webhook views — slash commands, dialog submissions, dialog refresh
+  2. Mattermost webhook views — handle slash commands, dialog refreshes, and submissions
 """
 
 from __future__ import annotations
@@ -11,7 +11,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+import dateutil.parser
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from drf_spectacular.utils import OpenApiResponse, extend_schema, extend_schema_view
 from rest_framework import status, viewsets
 from rest_framework.permissions import AllowAny
@@ -19,7 +21,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from reminders.models import Reminder, ReminderStatus
+from reminders.models import Reminder, ReminderStatus, RepeatType
 from reminders.serializers import (
     PendingReminderSerializer,
     ReminderSerializer,
@@ -211,13 +213,16 @@ class SlashRemindView(APIView):
                 status=status.HTTP_200_OK,
             )
 
+        # Build callback and refresh URLs
         callback_url = request.build_absolute_uri("/nudgy/mattermost/dialog/submit/")
-        logger.debug("Dialog callback URL: %s", callback_url)
+        refresh_url = request.build_absolute_uri("/nudgy/mattermost/dialog/refresh/")
+        logger.debug("Dialog urls — callback: %s, refresh: %s", callback_url, refresh_url)
 
         mm_service = MattermostService()
-        dialog_request = mm_service.build_reminder_dialog(
+        dialog_request = mm_service.open_reminder_dialog(
             trigger_id=trigger_id,
             callback_url=callback_url,
+            refresh_url=refresh_url,
         )
 
         try:
@@ -237,111 +242,42 @@ class SlashRemindView(APIView):
         return Response(status=status.HTTP_200_OK)
 
 
-class SlashListRemindersView(APIView):
-    """
-    POST /mattermost/slash/listr/
-
-    Receives the Mattermost slash-command payload and returns an ephemeral
-    message containing a Markdown table of the user's pending reminders.
-    """
-
-    permission_classes = [AllowAny]
-
-    @extend_schema(
-        tags=["Mattermost"],
-        summary="Handle /listr slash command",
-        description="Returns an ephemeral message with a table of pending reminders.",
-        responses={200: OpenApiResponse(description="Markdown table of reminders.")},
-    )
-    def post(self, request: Request) -> Response:
-        user_id: str = request.data.get("user_id", "")
-        
-        logger.info("Slash /listr received — user: %s", user_id)
-
-        # In a personal self-hosted app, we can show all pending reminders,
-        # but filtering by user_id makes it cleaner if there are multiple users.
-        # We will show all pending if user_id is missing for some reason.
-        qs = Reminder.objects.filter(status=ReminderStatus.PENDING).order_by("reminder_datetime")
-        if user_id:
-            qs = qs.filter(mattermost_user_id=user_id)
-
-        reminders = list(qs)
-
-        if not reminders:
-            return Response(
-                {
-                    "response_type": "ephemeral",
-                    "text": "You don't have any pending reminders.",
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        # Build Markdown table
-        lines = [
-            "### 📅 Your Pending Reminders",
-            "",
-            "| Title | Scheduled Time | Recurrence |",
-            "|:------|:---------------|:-----------|",
-        ]
-        
-        for r in reminders:
-            time_str = r.reminder_datetime.strftime("%Y-%m-%d %H:%M")
-            recurrence = r.recurrence_summary()
-            
-            # Escape pipes to avoid breaking the markdown table
-            title = r.title.replace("|", r"\|")
-            lines.append(f"| **{title}** | `{time_str}` | {recurrence} |")
-
-        return Response(
-            {
-                "response_type": "ephemeral",
-                "text": "\n".join(lines),
-            },
-            status=status.HTTP_200_OK,
-        )
-
-
 class DialogRefreshView(APIView):
     """
     POST /mattermost/dialog/refresh/
 
-    Handles Mattermost Interactive Dialog refresh callbacks.
-    When a user changes the repeat_type field, Mattermost POSTs
-    the current submission here and expects updated dialog elements
-    in response.
+    Handles dynamic updates as the user configures recurrence settings.
+    Inspects current values and returns the new set of elements.
     """
 
     permission_classes = [AllowAny]
 
     @extend_schema(
         tags=["Mattermost"],
-        summary="Handle dialog field refresh",
-        description="Returns updated dialog elements based on current field selections.",
-        responses={200: OpenApiResponse(description="Updated dialog elements.")},
+        summary="Handle dialog dynamic refresh",
+        description="Returns an updated dialog structure based on current selected values.",
+        responses={200: OpenApiResponse(description="Form representation JSON.")},
     )
     def post(self, request: Request) -> Response:
         payload = request.data
         submission: dict = payload.get("submission", {})
+        logger.info("Dialog refresh request received. Submission: %s", submission)
 
-        logger.info("Dialog refresh received — submission: %s", submission)
-
-        callback_url = request.build_absolute_uri("/nudgy/mattermost/dialog/submit/")
+        refresh_url = request.build_absolute_uri("/nudgy/mattermost/dialog/refresh/")
 
         mm_service = MattermostService()
-        repeat_type = submission.get("repeat_type", "none")
-        elements = mm_service._build_dialog_elements(repeat_type, submission)
+        elements = mm_service.build_dialog_elements(submission)
 
-        # Mattermost expects a partial dialog response with updated elements
-        response_payload = {
-            "update": {
+        return Response({
+            "type": "form",
+            "form": {
+                "callback_id": "create_reminder",
                 "title": "Create Reminder",
                 "submit_label": "Save",
+                "source_url": refresh_url,
                 "elements": elements,
-            },
-        }
-
-        logger.info("Dialog refresh response — %d elements for repeat_type=%s.", len(elements), repeat_type)
-        return Response(response_payload, status=status.HTTP_200_OK)
+            }
+        }, status=status.HTTP_200_OK)
 
 
 class DialogSubmitView(APIView):
@@ -349,8 +285,8 @@ class DialogSubmitView(APIView):
     POST /mattermost/dialog/submit/
 
     Receives the Interactive Dialog submission from Mattermost,
-    validates input, creates the Reminder with full recurrence
-    configuration, and sends a confirmation message.
+    validates input, creates the Reminder, and sends a confirmation
+    message back to the user's channel.
     """
 
     permission_classes = [AllowAny]
@@ -374,37 +310,181 @@ class DialogSubmitView(APIView):
             submission,
         )
 
-        # --- Validate & parse ---
         errors: dict[str, str] = {}
-        reminder_kwargs = self._validate_and_parse(submission, errors)
+
+        # 1. Title Validation
+        title = (submission.get("title") or "").strip()
+        if not title:
+            errors["title"] = "Reminder title is required."
+
+        # 2. Datetime Picker Validation
+        dt_str = (submission.get("reminder_datetime") or "").strip()
+        reminder_dt = None
+        if not dt_str:
+            errors["reminder_datetime"] = "Reminder time is required."
+        else:
+            try:
+                # Mattermost sends ISO/RFC3339 string (e.g. 2024-03-15T14:30:00-05:00)
+                reminder_dt = dateutil.parser.parse(dt_str)
+                # Convert naive to aware just in case (though it should be aware)
+                if timezone.is_naive(reminder_dt):
+                    reminder_dt = timezone.make_aware(reminder_dt, timezone.get_current_timezone())
+
+                # Prevent past dates
+                now = timezone.now()
+                if reminder_dt < now:
+                    errors["reminder_datetime"] = "Reminder time cannot be in the past."
+            except Exception:
+                errors["reminder_datetime"] = "Invalid date/time format."
+
+        # 3. Recurrence Logic & Validation
+        repeat_type = submission.get("repeat_type") or "none"
+        description = (submission.get("description") or "").strip()
+
+        # Fields to store
+        repeat_interval = 1
+        repeat_unit = ""
+        repeat_weekdays = []
+        monthly_mode = ""
+        monthly_day = None
+        monthly_week = ""
+        monthly_weekday = ""
+        yearly_month = None
+        yearly_day = None
+        repeat_forever = True
+        repeat_end_date = None
+        repeat_end_after = None
+
+        if repeat_type == RepeatType.INTERVAL:
+            try:
+                repeat_interval = int(submission.get("repeat_interval") or 1)
+                if repeat_interval <= 0:
+                    errors["repeat_interval"] = "Interval must be greater than 0."
+            except ValueError:
+                errors["repeat_interval"] = "Interval must be a valid positive integer."
+
+            repeat_unit = submission.get("repeat_unit") or "day"
+            if repeat_unit not in ["minute", "hour", "day", "week", "month", "year"]:
+                errors["repeat_unit"] = "Invalid repeat unit."
+
+        elif repeat_type == RepeatType.WEEKLY:
+            weekdays_raw = submission.get("repeat_weekdays")
+            if isinstance(weekdays_raw, list):
+                repeat_weekdays = weekdays_raw
+            elif isinstance(weekdays_raw, str):
+                repeat_weekdays = [w.strip() for w in weekdays_raw.split(",") if w.strip()]
+            else:
+                repeat_weekdays = []
+
+            if not repeat_weekdays:
+                errors["repeat_weekdays"] = "Please select at least one weekday."
+
+        elif repeat_type == RepeatType.MONTHLY:
+            monthly_mode = submission.get("monthly_mode") or "day_of_month"
+            if monthly_mode == "day_of_month":
+                try:
+                    monthly_day = int(submission.get("monthly_day") or 15)
+                    if not (1 <= monthly_day <= 31):
+                        errors["monthly_day"] = "Day must be between 1 and 31."
+                except ValueError:
+                    errors["monthly_day"] = "Day must be a valid integer."
+            elif monthly_mode == "weekday_position":
+                monthly_week = submission.get("monthly_week") or "first"
+                monthly_weekday = submission.get("monthly_weekday") or "monday"
+                if monthly_week not in ["first", "second", "third", "fourth", "last"]:
+                    errors["monthly_week"] = "Invalid week selector."
+                if monthly_weekday not in [
+                    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+                ]:
+                    errors["monthly_weekday"] = "Invalid weekday selector."
+            else:
+                errors["monthly_mode"] = "Invalid monthly mode."
+
+        elif repeat_type == RepeatType.YEARLY:
+            try:
+                yearly_month = int(submission.get("yearly_month") or 1)
+                if not (1 <= yearly_month <= 12):
+                    errors["yearly_month"] = "Month must be between 1 and 12."
+            except ValueError:
+                errors["yearly_month"] = "Month must be a valid integer."
+
+            try:
+                yearly_day = int(submission.get("yearly_day") or 1)
+                if not (1 <= yearly_day <= 31):
+                    errors["yearly_day"] = "Day must be between 1 and 31."
+            except ValueError:
+                errors["yearly_day"] = "Day must be a valid integer."
+
+        # Parse End Conditions
+        if repeat_type != "none":
+            repeat_until = submission.get("repeat_until") or "forever"
+            if repeat_until == "forever":
+                repeat_forever = True
+            elif repeat_until == "end_date":
+                repeat_forever = False
+                end_date_str = submission.get("repeat_end_date")
+                if not end_date_str:
+                    errors["repeat_end_date"] = "End date is required."
+                else:
+                    try:
+                        repeat_end_date = parse_date(end_date_str)
+                        if repeat_end_date is None:
+                            errors["repeat_end_date"] = "Invalid date format. Use YYYY-MM-DD."
+                        elif reminder_dt and repeat_end_date < reminder_dt.date():
+                            errors["repeat_end_date"] = "End date cannot be before reminder date."
+                    except Exception:
+                        errors["repeat_end_date"] = "Invalid date format. Use YYYY-MM-DD."
+            elif repeat_until == "end_after":
+                repeat_forever = False
+                try:
+                    repeat_end_after = int(submission.get("repeat_end_after") or 10)
+                    if repeat_end_after <= 0:
+                        errors["repeat_end_after"] = "Occurrences count must be greater than 0."
+                except ValueError:
+                    errors["repeat_end_after"] = "Occurrences count must be a valid integer."
 
         if errors:
             logger.warning("Dialog validation failed — user: %s, errors: %s", user_id, errors)
             return Response({"errors": errors}, status=status.HTTP_200_OK)
 
-        # --- Create the reminder ---
+        # Create the reminder
         reminder = Reminder.objects.create(
             mattermost_user_id=user_id,
-            **reminder_kwargs,
+            title=title,
+            description=description,
+            reminder_datetime=reminder_dt,
+            repeat_type=repeat_type,
+            repeat_interval=repeat_interval,
+            repeat_unit=repeat_unit,
+            repeat_weekdays=repeat_weekdays,
+            monthly_mode=monthly_mode,
+            monthly_day=monthly_day,
+            monthly_week=monthly_week,
+            monthly_weekday=monthly_weekday,
+            yearly_month=yearly_month,
+            yearly_day=yearly_day,
+            repeat_forever=repeat_forever,
+            repeat_end_date=repeat_end_date,
+            repeat_end_after=repeat_end_after,
         )
 
         logger.info(
             "Reminder created from dialog — external_id: %s, title: '%s', "
-            "datetime: %s, recurrence: %s, user: %s",
+            "datetime: %s, repeat: %s, user: %s",
             reminder.external_id,
             reminder.title,
             reminder.reminder_datetime,
-            reminder.recurrence_summary(),
+            reminder.repeat_type,
             user_id,
         )
 
-        # --- Send confirmation back ---
+        # Send confirmation message
         mm_service = MattermostService()
         confirmation = (
             f"✅ **Reminder saved successfully.**\n\n"
             f"**Title:** {reminder.title}\n"
             f"**When:** {reminder.reminder_datetime:%Y-%m-%d %H:%M}\n"
-            f"**Repeats:** {reminder.recurrence_summary()}"
+            f"**Repeats:** {reminder.get_repeat_type_display()}"
         )
 
         try:
@@ -422,133 +502,3 @@ class DialogSubmitView(APIView):
             )
 
         return Response(status=status.HTTP_200_OK)
-
-    # ------------------------------------------------------------------
-    # Validation helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _validate_and_parse(submission: dict, errors: dict) -> dict:
-        """
-        Parse and validate the dialog submission fields.
-        Returns a dict of Reminder model kwargs.
-        Populates ``errors`` dict with field-level error messages.
-        """
-        kwargs: dict = {}
-
-        # ---- Title ----
-        title = (submission.get("title") or "").strip()
-        if not title:
-            errors["title"] = "Reminder title is required."
-        kwargs["title"] = title
-        kwargs["description"] = (submission.get("description") or "").strip()
-
-        # ---- Date + Time ----
-        date_str = (submission.get("reminder_date") or "").strip()
-        hour = submission.get("reminder_hour", "09")
-        minute = submission.get("reminder_minute", "00")
-
-        if not date_str:
-            errors["reminder_date"] = "Reminder date is required."
-
-        reminder_dt = None
-        if date_str:
-            try:
-                time_str = f"{hour}:{minute}"
-                naive_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-                reminder_dt = timezone.make_aware(naive_dt, timezone.get_current_timezone())
-            except ValueError:
-                errors["reminder_date"] = "Invalid date format. Use YYYY-MM-DD."
-
-        if reminder_dt:
-            kwargs["reminder_date"] = reminder_dt.date()
-            kwargs["reminder_datetime"] = reminder_dt
-        elif not errors.get("reminder_date"):
-            errors["reminder_date"] = "Could not parse reminder date/time."
-
-        # ---- Recurrence ----
-        repeat_type = submission.get("repeat_type", "none")
-        kwargs["repeat_type"] = repeat_type
-
-        if repeat_type == "interval":
-            try:
-                kwargs["repeat_interval"] = max(1, int(submission.get("repeat_interval", 1)))
-            except (ValueError, TypeError):
-                errors["repeat_interval"] = "Must be a positive number."
-                kwargs["repeat_interval"] = 1
-
-            repeat_unit = submission.get("repeat_unit", "day")
-            if repeat_unit not in ("minute", "hour", "day", "week", "month", "year"):
-                errors["repeat_unit"] = "Invalid unit."
-            kwargs["repeat_unit"] = repeat_unit
-
-        elif repeat_type == "weekly":
-            raw_weekdays = (submission.get("repeat_weekdays") or "").strip()
-            if raw_weekdays:
-                weekday_list = [d.strip().lower() for d in raw_weekdays.split(",") if d.strip()]
-                valid_days = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
-                invalid = [d for d in weekday_list if d not in valid_days]
-                if invalid:
-                    errors["repeat_weekdays"] = f"Invalid weekday(s): {', '.join(invalid)}"
-                kwargs["repeat_weekdays"] = weekday_list
-            else:
-                errors["repeat_weekdays"] = "Select at least one weekday."
-
-        elif repeat_type == "monthly":
-            monthly_mode = submission.get("monthly_mode", "day_of_month")
-            kwargs["monthly_mode"] = monthly_mode
-
-            if monthly_mode == "day_of_month":
-                try:
-                    day = int(submission.get("monthly_day", 1))
-                    if day < 1 or day > 31:
-                        errors["monthly_day"] = "Day must be between 1 and 31."
-                    kwargs["monthly_day"] = day
-                except (ValueError, TypeError):
-                    errors["monthly_day"] = "Must be a number (1–31)."
-
-            elif monthly_mode == "weekday_position":
-                kwargs["monthly_week"] = submission.get("monthly_week", "first")
-                kwargs["monthly_weekday"] = submission.get("monthly_weekday", "monday")
-
-        elif repeat_type == "yearly":
-            # For yearly, we store the recurrence in the reminder_datetime itself.
-            # The yearly_month and yearly_day from the dialog are informational
-            # for display — the actual date anchoring is via reminder_datetime.
-            pass
-
-        # ---- End conditions ----
-        if repeat_type != "none":
-            end_type = submission.get("repeat_end_type", "forever")
-
-            if end_type == "forever":
-                kwargs["repeat_forever"] = True
-            elif end_type == "end_date":
-                kwargs["repeat_forever"] = False
-                end_date_str = (submission.get("repeat_end_date") or "").strip()
-                if end_date_str:
-                    try:
-                        kwargs["repeat_end_date"] = datetime.strptime(end_date_str, "%Y-%m-%d").date()
-                    except ValueError:
-                        errors["repeat_end_date"] = "Invalid date. Use YYYY-MM-DD."
-                else:
-                    errors["repeat_end_date"] = "End date is required."
-            elif end_type == "end_after":
-                kwargs["repeat_forever"] = False
-                try:
-                    count = int(submission.get("repeat_end_after", 10))
-                    if count < 1:
-                        errors["repeat_end_after"] = "Must be at least 1."
-                    kwargs["repeat_end_after"] = count
-                except (ValueError, TypeError):
-                    errors["repeat_end_after"] = "Must be a positive number."
-        else:
-            kwargs["repeat_forever"] = False
-
-        # ---- Snooze ----
-        try:
-            kwargs["snooze_minutes"] = int(submission.get("snooze_minutes", 0) or 0)
-        except (ValueError, TypeError):
-            kwargs["snooze_minutes"] = 0
-
-        return kwargs

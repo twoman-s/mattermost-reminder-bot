@@ -1,7 +1,5 @@
 """
 DRF serializers for the Reminder model.
-
-Updated for the full recurrence engine.
 """
 
 from __future__ import annotations
@@ -14,10 +12,6 @@ from reminders.models import Reminder
 class ReminderSerializer(serializers.ModelSerializer):
     """Full serializer used for CRUD operations."""
 
-    recurrence_summary = serializers.CharField(
-        read_only=True,
-    )
-
     class Meta:
         model = Reminder
         fields = [
@@ -25,9 +19,7 @@ class ReminderSerializer(serializers.ModelSerializer):
             "mattermost_user_id",
             "title",
             "description",
-            "reminder_date",
             "reminder_datetime",
-            # Recurrence
             "repeat_type",
             "repeat_interval",
             "repeat_unit",
@@ -36,20 +28,17 @@ class ReminderSerializer(serializers.ModelSerializer):
             "monthly_day",
             "monthly_week",
             "monthly_weekday",
-            # End conditions
+            "yearly_month",
+            "yearly_day",
             "repeat_forever",
             "repeat_end_date",
             "repeat_end_after",
             "occurrence_count",
-            # Other
-            "snooze_minutes",
             "status",
             "last_triggered_at",
             "created_at",
             "updated_at",
             "completed_at",
-            # Computed
-            "recurrence_summary",
         ]
         read_only_fields = [
             "external_id",
@@ -58,16 +47,11 @@ class ReminderSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "completed_at",
-            "recurrence_summary",
         ]
 
 
 class PendingReminderSerializer(serializers.ModelSerializer):
     """Lightweight serializer for the n8n polling endpoint."""
-
-    recurrence_summary = serializers.CharField(
-        read_only=True,
-    )
 
     class Meta:
         model = Reminder
@@ -77,16 +61,11 @@ class PendingReminderSerializer(serializers.ModelSerializer):
             "description",
             "reminder_datetime",
             "repeat_type",
-            "recurrence_summary",
         ]
 
 
 class TriggerResponseSerializer(serializers.ModelSerializer):
     """Serializer returned after a reminder is triggered."""
-
-    recurrence_summary = serializers.CharField(
-        read_only=True,
-    )
 
     class Meta:
         model = Reminder
@@ -99,5 +78,4 @@ class TriggerResponseSerializer(serializers.ModelSerializer):
             "occurrence_count",
             "last_triggered_at",
             "completed_at",
-            "recurrence_summary",
         ]
