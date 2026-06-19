@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  reminderbot:
+    build: .
+    container_name: reminderbot
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=reminderbot.settings
