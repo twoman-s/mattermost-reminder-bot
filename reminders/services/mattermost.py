@@ -356,14 +356,16 @@ class MattermostService:
             table_lines = [
                 "### Reminders List",
                 "",
-                "| Title | When | Repeats |",
-                "| :--- | :--- | :--- |"
+                "| Title | When | Repeats | Next Run | Status |",
+                "| :--- | :--- | :--- | :--- | :--- |"
             ]
             for r in page_obj:
                 when_str = r.reminder_datetime.strftime("%Y-%m-%d %H:%M")
                 repeats_str = r.get_repeat_type_display()
+                next_run_str = r.next_run_at.strftime("%Y-%m-%d %H:%M") if r.next_run_at else ""
+                status_str = r.get_status_display()
                 title_escaped = r.title.replace("|", "\\|")
-                table_lines.append(f"| {title_escaped} | {when_str} | {repeats_str} |")
+                table_lines.append(f"| {title_escaped} | {when_str} | {repeats_str} | {next_run_str} | {status_str} |")
             markdown_table = "\n".join(table_lines)
         else:
             markdown_table = "### Reminders List\n\nNo reminders found."
