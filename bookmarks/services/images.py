@@ -127,16 +127,25 @@ class BookmarkImageService:
         # Stream and validate size
         chunks: list[bytes] = []
         total_size = 0
-        for chunk in resp.iter_content(chunk_size=8192):
-            total_size += len(chunk)
-            if total_size > MAX_FILE_SIZE:
-                logger.warning(
-                    "Image too large (>%d bytes) for %s",
-                    MAX_FILE_SIZE,
-                    image_url,
-                )
-                return None
-            chunks.append(chunk)
+        try:
+            for chunk in resp.iter_content(chunk_size=8192):
+                total_size += len(chunk)
+                if total_size > MAX_FILE_SIZE:
+                    logger.warning(
+                        "Image too large (>%d bytes) for %s",
+                        MAX_FILE_SIZE,
+                        image_url,
+                    )
+                    return None
+                chunks.append(chunk)
+        except Exception as e:
+            logger.warning(
+                "Failed to stream image %s for bookmark %s: %s",
+                image_url,
+                bookmark.external_id,
+                e,
+            )
+            return None
 
         image_data = b"".join(chunks)
         if not image_data:

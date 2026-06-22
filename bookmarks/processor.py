@@ -121,10 +121,10 @@ def _send_enriched_preview(bookmark: Bookmark) -> None:
         f"**Title:**\n{bookmark.title or bookmark.url}",
         "",
         f"**Type:**\n{bookmark.get_bookmark_type_display()}",
-        "",
-        f"**Domain:**\n{bookmark.domain}",
-        "",
-        f"**ID:**\nBK-{str(bookmark.external_id)[:8]}",
+        # "",
+        # f"**Domain:**\n{bookmark.domain}",
+        # "",
+        # f"**ID:**\nBK-{str(bookmark.external_id)[:8]}",
     ]
 
     # Provider-specific details
