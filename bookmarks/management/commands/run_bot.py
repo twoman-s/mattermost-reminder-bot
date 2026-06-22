@@ -81,6 +81,7 @@ class Command(BaseCommand):
                 channel_type = data.get("channel_type")
                 user_id = post.get("user_id")
                 channel_id = post.get("channel_id")
+                post_id = post.get("id")
                 text = post.get("message", "")
 
                 # Only process direct messages
@@ -137,6 +138,21 @@ class Command(BaseCommand):
                         existing = Bookmark.objects.filter(url=url).first()
                         if existing:
                             duplicate_bookmarks.append(existing)
+
+                # Delete the original user message now that it is processing
+                if post_id and (created_bookmarks or duplicate_bookmarks):
+                    try:
+                        resp = requests.delete(
+                            f"{base_url}/api/v4/posts/{post_id}",
+                            headers=headers,
+                            timeout=5
+                        )
+                        if resp.status_code == 200:
+                            logger.info("Deleted original user message %s", post_id)
+                        else:
+                            logger.warning("Failed to delete user message %s: HTTP %d", post_id, resp.status_code)
+                    except Exception as e:
+                        logger.error("Error deleting user message %s: %s", post_id, e)
 
                 # Do NOT send intermediate 'Processing' messages.
                 # Only log them.
