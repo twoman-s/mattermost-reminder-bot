@@ -9,13 +9,13 @@ from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 urlpatterns = [
-    path("nudgy/admin/", admin.site.urls),
+    path("may/admin/", admin.site.urls),
     # API documentation
-    path("nudgy/api/schema/", SpectacularAPIView.as_view(), name="schema"),
-    path("nudgy/api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    path("may/api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    path("may/api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     # Application URLs
-    path("nudgy/", include("reminders.urls")),
-    path("nudgy/", include("bookmarks.urls")),
+    path("may/", include("reminders.urls")),
+    path("may/", include("bookmarks.urls")),
 ]
 
 # Serve media files in development
