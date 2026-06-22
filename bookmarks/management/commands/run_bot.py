@@ -95,6 +95,9 @@ class Command(BaseCommand):
                 if post.get("props", {}).get("from_webhook") == "true":
                     return
 
+                if "Bookmark deleted:" in text or "Bookmark Saved" in text or "Already bookmarked" in text:
+                    return
+
                 logger.info("WS DM received — user: %s, channel: %s", user_id, channel_id)
 
                 urls = _URL_PATTERN.findall(text)

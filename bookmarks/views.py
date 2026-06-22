@@ -83,6 +83,10 @@ class DMWebhookView(APIView):
         if bot_id:
             return Response(status=status.HTTP_200_OK)
 
+        # Explicitly ignore our own notification strings
+        if "Bookmark deleted:" in text or "Bookmark Saved" in text or "Already bookmarked" in text:
+            return Response(status=status.HTTP_200_OK)
+
         logger.info(
             "DM webhook received — user: %s, channel: %s, text_length: %d",
             user_id,
@@ -318,13 +322,13 @@ class SlashListbView(APIView):
                 
                 img_md = ""
                 if bk.image_url:
-                    img_md = f"![img]({bk.image_url} =100x80)\n\n"
-
+                    img_md = f"![img]({bk.image_url} =250x120)\n\n"
+                
                 intro_lines.append(
                     f"{img_md}**{type_emoji} [{title_clean}]({bk.url})**\n"
                     f"**Domain:** {bk.domain} | **Date:** {bk.created_at.strftime('%Y-%m-%d')}\n"
                     f"**Tags:** {tags_str or 'None'}\n"
-                    f"_{desc}_\n"
+                    f"> {desc}\n\n"
                     "---\n"
                 )
 
