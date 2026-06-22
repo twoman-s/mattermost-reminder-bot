@@ -6,6 +6,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from bookmarks.views import (
+    BookmarkDialogRefreshView,
     BookmarkDialogSubmitView,
     BookmarkViewSet,
     DMWebhookView,
@@ -26,5 +27,10 @@ urlpatterns = [
         "mattermost/bookmark/dialog/submit/",
         BookmarkDialogSubmitView.as_view(),
         name="mattermost-bookmark-dialog-submit",
+    ),
+    path(
+        "mattermost/bookmark/dialog/refresh/",
+        BookmarkDialogRefreshView.as_view(),
+        name="mattermost-bookmark-dialog-refresh",
     ),
 ]

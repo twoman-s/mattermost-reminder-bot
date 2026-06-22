@@ -250,120 +250,256 @@ class SlashListbView(APIView):
         responses={200: OpenApiResponse(description="Bookmark list message.")},
     )
     def post(self, request: Request) -> Response:
-        trigger_id = request.data.get("trigger_id", "")
-        user_id = request.data.get("user_id", "")
-        channel_id = request.data.get("channel_id", "")
-        text = (request.data.get("text", "") or "").strip().lower()
+        return self._handle_command(request.data, request)
 
-        logger.info(
-            "Slash /listb received — user: %s, channel: %s, filter: %s",
-            user_id,
-            channel_id,
-            text or "recent",
-        )
+    @extend_schema(
+        tags=["Mattermost"],
+        summary="Handle /listb slash command via GET",
+        responses={200: OpenApiResponse(description="Bookmark list message.")},
+    )
+    def get(self, request: Request) -> Response:
+        return self._handle_command(request.query_params, request)
 
-        # Determine filter
-        filters: dict = {}
-        if text in ("github", "youtube", "reddit", "article", "pdf", "documentation", "website"):
-            filters["bookmark_type"] = text
-        elif text == "archived":
-            filters["is_archived"] = True
-        elif text == "unread":
-            filters["is_archived"] = False
-        # default: recent (no filter)
+    def _build_bookmark_dialog(self, submission: dict) -> dict:
+        page_num = 1
+        try:
+            page_num = int(submission.get("page") or 1)
+        except ValueError:
+            pass
 
-        bookmarks = BookmarkSearchService.search(filters)[:15]
+        page_size = 5
+        try:
+            page_size = int(submission.get("page_size") or 5)
+        except ValueError:
+            pass
 
-        if not bookmarks:
+        pagination_action = submission.get("pagination_action") or "current"
+        if pagination_action == "prev":
+            page_num = max(1, page_num - 1)
+        elif pagination_action == "next":
+            page_num = page_num + 1
+
+        bk_qs = BookmarkSearchService.search({})
+        total_count = bk_qs.count()
+
+        from django.core.paginator import Paginator
+        paginator = Paginator(bk_qs, page_size)
+
+        if page_num > paginator.num_pages:
+            page_num = paginator.num_pages
+        if page_num < 1:
+            page_num = 1
+
+        page_obj = paginator.get_page(page_num) if total_count > 0 else []
+
+        intro_lines = [
+            f"### Bookmark Vault ({total_count} total)",
+            "---",
+        ]
+
+        manage_options = []
+
+        if total_count > 0:
+            for bk in page_obj:
+                type_emoji = "🌐"
+                if bk.bookmark_type == BookmarkType.GITHUB:
+                    type_emoji = "🐙"
+                elif bk.bookmark_type == BookmarkType.YOUTUBE:
+                    type_emoji = "▶️"
+                elif bk.bookmark_type == BookmarkType.REDDIT:
+                    type_emoji = "👽"
+                elif bk.bookmark_type == BookmarkType.PDF:
+                    type_emoji = "📄"
+
+                tags_str = ", ".join(bk.tags.values_list("name", flat=True))
+                desc = bk.description[:120] + "…" if bk.description and len(bk.description) > 120 else (bk.description or "")
+                
+                title_clean = (bk.title or bk.url)[:60]
+                
+                img_md = ""
+                if bk.image_url:
+                    img_md = f"![img]({bk.image_url})\n\n"
+
+                intro_lines.append(
+                    f"{img_md}**{type_emoji} [{title_clean}]({bk.url})**\n"
+                    f"**Domain:** {bk.domain} | **Date:** {bk.created_at.strftime('%Y-%m-%d')}\n"
+                    f"**Tags:** {tags_str or 'None'}\n"
+                    f"_{desc}_\n"
+                    "---\n"
+                )
+
+                manage_options.append({
+                    "text": title_clean[:30],
+                    "value": str(bk.external_id)
+                })
+        else:
+            intro_lines.append("No bookmarks found. DM me a link to save one!")
+            manage_options.append({"text": "No bookmarks available", "value": "none"})
+
+        # Page options
+        page_options = []
+        num_pages = paginator.num_pages if total_count > 0 else 1
+        for p in range(1, num_pages + 1):
+            page_options.append({"text": f"Page {p}", "value": str(p)})
+
+        # Elements
+        elements = [
+            {
+                "display_name": "Page Size",
+                "name": "page_size",
+                "type": "select",
+                "default": str(page_size),
+                "refresh": True,
+                "options": [
+                    {"text": "5 items", "value": "5"},
+                    {"text": "10 items", "value": "10"},
+                    {"text": "15 items", "value": "15"},
+                ],
+            },
+            {
+                "display_name": "Select Page",
+                "name": "page",
+                "type": "select",
+                "default": str(page_num),
+                "refresh": True,
+                "options": page_options,
+            },
+            {
+                "display_name": "Pagination Actions",
+                "name": "pagination_action",
+                "type": "select",
+                "default": "current",
+                "refresh": True,
+                "options": [
+                    {"text": "Stay on Current Page", "value": "current"},
+                    {"text": "◄ Previous Page", "value": "prev"},
+                    {"text": "Next Page ►", "value": "next"},
+                ],
+            }
+        ]
+
+        if total_count > 0:
+            elements.append({
+                "display_name": "Select Bookmark",
+                "name": "bookmark_to_manage",
+                "type": "select",
+                "default": submission.get("bookmark_to_manage") or "",
+                "options": manage_options,
+                "optional": True,
+            })
+            elements.append({
+                "display_name": "Action",
+                "name": "bookmark_action",
+                "type": "select",
+                "default": submission.get("bookmark_action") or "details",
+                "options": [
+                    {"text": "View Details (Not Implemented)", "value": "details"},
+                    {"text": "Archive", "value": "archive"},
+                    {"text": "Delete", "value": "delete"},
+                ],
+                "optional": True,
+            })
+
+        return {
+            "callback_id": "list_bookmarks",
+            "title": "Bookmark Vault",
+            "submit_label": "Execute Action",
+            "introduction_text": "\n".join(intro_lines)[:3000],  # Mattermost limit is 3000 chars for intro_text
+            "elements": elements,
+        }
+
+    def _handle_command(self, payload: dict, request: Request) -> Response:
+        trigger_id = payload.get("trigger_id", "")
+        user_id = payload.get("user_id", "")
+        
+        if not trigger_id:
+            return Response({"text": "Missing trigger_id."}, status=status.HTTP_200_OK)
+
+        callback_url = request.build_absolute_uri("/may/mattermost/bookmark/dialog/submit/")
+        
+        dialog_data = self._build_bookmark_dialog({})
+        
+        mm_service = MattermostService()
+        dialog_request = {
+            "trigger_id": trigger_id,
+            "url": callback_url,
+            "dialog": dialog_data,
+        }
+        
+        try:
+            mm_service.post_open_dialog(dialog_request)
+        except Exception:
+            logger.error("Failed to open bookmark dialog", exc_info=True)
             return Response(
-                {"response_type": "ephemeral", "text": "📚 **No bookmarks found.**\n\nDM me a URL to save your first bookmark!"},
+                {"response_type": "ephemeral", "text": "Failed to open dialog. Please ensure Mattermost is reachable."},
                 status=status.HTTP_200_OK,
             )
 
-        attachments = []
-        for bk in bookmarks:
-            tags_str = ", ".join(bk.tags.values_list("name", flat=True))
-            desc = bk.description[:200] + ("…" if len(bk.description) > 200 else "") if bk.description else ""
-
-            fields = [
-                {"short": True, "title": "Type", "value": bk.get_bookmark_type_display()},
-                {"short": True, "title": "Date", "value": bk.created_at.strftime("%Y-%m-%d")},
-            ]
-            if tags_str:
-                fields.append({"short": False, "title": "Tags", "value": tags_str})
-
-            actions = []
-            if not bk.is_archived:
-                actions.append({
-                    "name": "Archive",
-                    "integration": {
-                        "url": request.build_absolute_uri("/may/mattermost/bookmark/dialog/submit/"),
-                        "context": {"action": "archive", "external_id": str(bk.external_id)}
-                    }
-                })
-            actions.append({
-                "name": "Delete",
-                "style": "danger",
-                "integration": {
-                    "url": request.build_absolute_uri("/may/mattermost/bookmark/dialog/submit/"),
-                    "context": {"action": "delete", "external_id": str(bk.external_id)}
-                }
-            })
-
-            attachments.append({
-                "fallback": bk.title or bk.url,
-                "color": "#6366f1",
-                "title": bk.title or bk.url,
-                "title_link": bk.url,
-                "text": desc,
-                "thumb_url": bk.image_url if bk.image_url else None,
-                "fields": fields,
-                "actions": actions
-            })
-
-        return Response({
-            "response_type": "ephemeral",
-            "text": "📚 **Recent Bookmarks**",
-            "attachments": attachments
-        }, status=status.HTTP_200_OK)
-
+        return Response(status=status.HTTP_200_OK)
 
 # ======================================================================
 # Bookmark Dialog Views (for interactive actions)
 # ======================================================================
 
 
-class BookmarkDialogSubmitView(APIView):
+class BookmarkDialogRefreshView(APIView):
     """
-    POST /may/mattermost/bookmark/dialog/submit/
-
-    Handles interactive dialog submissions and interactive button clicks 
-    for bookmark actions (archive, delete).
+    POST /may/mattermost/bookmark/dialog/refresh/
+    Handles dynamic updates as the user pages through bookmarks.
     """
 
     permission_classes = [AllowAny]
 
     @extend_schema(
         tags=["Mattermost"],
-        summary="Handle bookmark dialog/button submission",
+        summary="Handle bookmark dialog dynamic refresh",
+        responses={200: OpenApiResponse(description="Form representation JSON.")},
+    )
+    def post(self, request: Request) -> Response:
+        payload = request.data
+        submission: dict = payload.get("submission", {})
+        
+        logger.info("Bookmark dialog refresh received. Submission: %s", submission)
+
+        listb_view = SlashListbView()
+        dialog_data = listb_view._build_bookmark_dialog(submission)
+
+        return Response(dialog_data, status=status.HTTP_200_OK)
+
+
+class BookmarkDialogSubmitView(APIView):
+    """
+    POST /may/mattermost/bookmark/dialog/submit/
+
+    Handles interactive dialog submissions for bookmark actions (archive, delete).
+    """
+
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        tags=["Mattermost"],
+        summary="Handle bookmark dialog submission",
         responses={200: OpenApiResponse(description="Action result.")},
     )
     def post(self, request: Request) -> Response:
         payload = request.data
-        context = payload.get("context", {})
+        submission = payload.get("submission", {})
         channel_id = payload.get("channel_id", "")
+        user_id = payload.get("user_id", "")
 
         logger.info(
-            "Bookmark action submit — context: %s",
-            context,
+            "Bookmark dialog submit — submission: %s",
+            submission,
         )
 
-        action_type = context.get("action")
-        external_id = context.get("external_id")
+        action_type = submission.get("bookmark_action")
+        external_id = submission.get("bookmark_to_manage")
 
-        if not action_type or not external_id:
-            logger.warning("Invalid action payload: %s", payload)
+        if not action_type or not external_id or external_id == "none":
+            logger.warning("Invalid or empty action payload: %s", payload)
             return Response(status=status.HTTP_200_OK)
+
+        mm_service = MattermostService()
 
         # --- Archive action ---
         if action_type == "archive":
@@ -371,10 +507,12 @@ class BookmarkDialogSubmitView(APIView):
                 bookmark = Bookmark.objects.get(external_id=external_id)
                 bookmark.is_archived = True
                 bookmark.save()
-                return Response({"ephemeral_text": f"📦 **Bookmark archived:** {bookmark.title or bookmark.url}"}, status=status.HTTP_200_OK)
+                if channel_id:
+                    mm_service.send_channel_message(
+                        channel_id, f"📦 **Bookmark archived:** {bookmark.title or bookmark.url}"
+                    )
             except Bookmark.DoesNotExist:
                 logger.warning("Bookmark %s not found for archive.", external_id)
-                return Response({"ephemeral_text": "Bookmark not found."}, status=status.HTTP_200_OK)
 
         # --- Delete action ---
         elif action_type == "delete":
@@ -382,10 +520,12 @@ class BookmarkDialogSubmitView(APIView):
                 bookmark = Bookmark.objects.get(external_id=external_id)
                 title = bookmark.title or bookmark.url
                 bookmark.delete()
-                return Response({"ephemeral_text": f"🗑️ **Bookmark deleted:** {title}"}, status=status.HTTP_200_OK)
+                if channel_id:
+                    mm_service.send_channel_message(
+                        channel_id, f"🗑️ **Bookmark deleted:** {title}"
+                    )
             except Bookmark.DoesNotExist:
                 logger.warning("Bookmark %s not found for delete.", external_id)
-                return Response({"ephemeral_text": "Bookmark not found."}, status=status.HTTP_200_OK)
 
         return Response(status=status.HTTP_200_OK)
 
