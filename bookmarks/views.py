@@ -322,7 +322,7 @@ class SlashListbView(APIView):
                 
                 img_md = ""
                 if bk.image_url:
-                    img_md = f"![img]({bk.image_url} =250x120)\n\n"
+                    img_md = f"![img]({bk.image_url} =240x120)\n\n"
                 
                 intro_lines.append(
                     f"> {img_md}\n"
