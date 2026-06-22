@@ -276,30 +276,56 @@ class SlashListbView(APIView):
 
         if not bookmarks:
             return Response(
-                {"text": "📚 **No bookmarks found.**\n\nDM me a URL to save your first bookmark!"},
+                {"response_type": "ephemeral", "text": "📚 **No bookmarks found.**\n\nDM me a URL to save your first bookmark!"},
                 status=status.HTTP_200_OK,
             )
 
-        # Build card-style response
-        lines = ["📚 **Recent Bookmarks**", ""]
-
+        attachments = []
         for bk in bookmarks:
-            type_emoji = _type_emoji(bk.bookmark_type)
             tags_str = ", ".join(bk.tags.values_list("name", flat=True))
-            tag_line = f"  Tags: {tags_str}" if tags_str else ""
+            desc = bk.description[:200] + ("…" if len(bk.description) > 200 else "") if bk.description else ""
 
-            lines.append(f"**{type_emoji} [{bk.title or bk.url}]({bk.url})**")
-            lines.append(f"  {bk.domain} · {bk.get_bookmark_type_display()} · {bk.created_at.strftime('%Y-%m-%d')}")
-            if tag_line:
-                lines.append(tag_line)
-            if bk.description:
-                desc = bk.description[:120]
-                if len(bk.description) > 120:
-                    desc += "…"
-                lines.append(f"  _{desc}_")
-            lines.append("")
+            fields = [
+                {"short": True, "title": "Type", "value": bk.get_bookmark_type_display()},
+                {"short": True, "title": "Date", "value": bk.created_at.strftime("%Y-%m-%d")},
+            ]
+            if tags_str:
+                fields.append({"short": False, "title": "Tags", "value": tags_str})
 
-        return Response({"text": "\n".join(lines)}, status=status.HTTP_200_OK)
+            actions = []
+            if not bk.is_archived:
+                actions.append({
+                    "name": "Archive",
+                    "integration": {
+                        "url": request.build_absolute_uri("/may/mattermost/bookmark/dialog/submit/"),
+                        "context": {"action": "archive", "external_id": str(bk.external_id)}
+                    }
+                })
+            actions.append({
+                "name": "Delete",
+                "style": "danger",
+                "integration": {
+                    "url": request.build_absolute_uri("/may/mattermost/bookmark/dialog/submit/"),
+                    "context": {"action": "delete", "external_id": str(bk.external_id)}
+                }
+            })
+
+            attachments.append({
+                "fallback": bk.title or bk.url,
+                "color": "#6366f1",
+                "title": bk.title or bk.url,
+                "title_link": bk.url,
+                "text": desc,
+                "thumb_url": bk.image_url if bk.image_url else None,
+                "fields": fields,
+                "actions": actions
+            })
+
+        return Response({
+            "response_type": "ephemeral",
+            "text": "📚 **Recent Bookmarks**",
+            "attachments": attachments
+        }, status=status.HTTP_200_OK)
 
 
 # ======================================================================
@@ -309,62 +335,57 @@ class SlashListbView(APIView):
 
 class BookmarkDialogSubmitView(APIView):
     """
-    POST /nudgy/mattermost/bookmark/dialog/submit/
+    POST /may/mattermost/bookmark/dialog/submit/
 
-    Handles interactive dialog submissions for bookmark actions
-    (archive, delete, tag management).
+    Handles interactive dialog submissions and interactive button clicks 
+    for bookmark actions (archive, delete).
     """
 
     permission_classes = [AllowAny]
 
     @extend_schema(
         tags=["Mattermost"],
-        summary="Handle bookmark dialog submission",
+        summary="Handle bookmark dialog/button submission",
         responses={200: OpenApiResponse(description="Action result.")},
     )
     def post(self, request: Request) -> Response:
         payload = request.data
-        submission = payload.get("submission", {})
-        callback_id = payload.get("callback_id", "")
+        context = payload.get("context", {})
         channel_id = payload.get("channel_id", "")
 
         logger.info(
-            "Bookmark dialog submit — callback: %s, submission: %s",
-            callback_id,
-            submission,
+            "Bookmark action submit — context: %s",
+            context,
         )
 
-        mm_service = MattermostService()
+        action_type = context.get("action")
+        external_id = context.get("external_id")
+
+        if not action_type or not external_id:
+            logger.warning("Invalid action payload: %s", payload)
+            return Response(status=status.HTTP_200_OK)
 
         # --- Archive action ---
-        if callback_id.startswith("archive_bookmark_"):
-            external_id = callback_id.replace("archive_bookmark_", "")
+        if action_type == "archive":
             try:
                 bookmark = Bookmark.objects.get(external_id=external_id)
                 bookmark.is_archived = True
                 bookmark.save()
-                if channel_id:
-                    mm_service.send_channel_message(
-                        channel_id,
-                        f"📦 **Bookmark archived:** {bookmark.title or bookmark.url}",
-                    )
+                return Response({"ephemeral_text": f"📦 **Bookmark archived:** {bookmark.title or bookmark.url}"}, status=status.HTTP_200_OK)
             except Bookmark.DoesNotExist:
                 logger.warning("Bookmark %s not found for archive.", external_id)
+                return Response({"ephemeral_text": "Bookmark not found."}, status=status.HTTP_200_OK)
 
         # --- Delete action ---
-        elif callback_id.startswith("delete_bookmark_"):
-            external_id = callback_id.replace("delete_bookmark_", "")
+        elif action_type == "delete":
             try:
                 bookmark = Bookmark.objects.get(external_id=external_id)
                 title = bookmark.title or bookmark.url
                 bookmark.delete()
-                if channel_id:
-                    mm_service.send_channel_message(
-                        channel_id,
-                        f"🗑️ **Bookmark deleted:** {title}",
-                    )
+                return Response({"ephemeral_text": f"🗑️ **Bookmark deleted:** {title}"}, status=status.HTTP_200_OK)
             except Bookmark.DoesNotExist:
                 logger.warning("Bookmark %s not found for delete.", external_id)
+                return Response({"ephemeral_text": "Bookmark not found."}, status=status.HTTP_200_OK)
 
         return Response(status=status.HTTP_200_OK)
 

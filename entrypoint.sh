@@ -14,6 +14,9 @@ python manage.py collectstatic --noinput 2>/dev/null || true
 echo "==> Starting Cron Daemon..."
 cron
 
+echo "==> Starting Bot WebSocket Listener..."
+python manage.py run_bot &
+
 echo "==> Starting Gunicorn..."
 exec gunicorn reminderbot.wsgi:application \
     --bind 0.0.0.0:8000 \
