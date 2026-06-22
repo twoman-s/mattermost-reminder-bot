@@ -322,12 +322,11 @@ class SlashListbView(APIView):
                 
                 img_md = ""
                 if bk.image_url:
-                    img_md = f"![img]({bk.image_url} =240x120)\n\n"
+                    img_md = f"![img]({bk.image_url} =240x120)\n"
                 
                 intro_lines.append(
                     f"> {img_md}\n"
-                    f">\n"
-                    f"> ### {type_emoji} [{title_clean}]({bk.url})\n"
+                    f"> {type_emoji} [{title_clean}]({bk.url})\n"
                     f"> {desc}\n"
                     f">\n"
                     f"> **🌐 {bk.domain}** • {bk.created_at.strftime('%Y-%m-%d')}\n"
