@@ -113,7 +113,7 @@ def _send_enriched_preview(bookmark: Bookmark) -> None:
 
     mm = MattermostService()
     # Always post to the designated bot channel rather than the DM chat
-    channel_id = settings.MATTERMOST_REMINDER_CHANNEL_ID
+    channel_id = settings.MATTERMOST_BOOKMARKS_CHANNEL_ID
 
     lines = [
         "📚 **Bookmark Saved**",
