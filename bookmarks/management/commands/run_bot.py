@@ -87,8 +87,12 @@ class Command(BaseCommand):
                 if channel_type != "D":
                     return
 
-                # Ignore our own messages
+                # Ignore our own messages and any bot/webhook messages
                 if user_id == bot_user_id:
+                    return
+                if post.get("props", {}).get("from_bot") == "true":
+                    return
+                if post.get("props", {}).get("from_webhook") == "true":
                     return
 
                 logger.info("WS DM received — user: %s, channel: %s", user_id, channel_id)
@@ -131,20 +135,15 @@ class Command(BaseCommand):
                         if existing:
                             duplicate_bookmarks.append(existing)
 
-                # Send reply via REST API
-                response_lines = []
-                for bk in created_bookmarks:
-                    response_lines.append(
-                        f"📚 **Bookmark Saved**\n\n**URL:** {bk.url}\n**Domain:** {bk.domain}\n\n_Processing metadata..._"
-                    )
-                for bk in duplicate_bookmarks:
-                    response_lines.append(
-                        f"🔄 **Already bookmarked**\n\n**Title:** {bk.title or bk.url}\n**Domain:** {bk.domain}\n**ID:** BK-{str(bk.external_id)[:8]}"
-                    )
-
-                if response_lines:
+                # Do NOT send intermediate 'Processing' messages.
+                # Only log them.
+                if duplicate_bookmarks:
+                    response_lines = []
+                    for bk in duplicate_bookmarks:
+                        response_lines.append(
+                            f"🔄 **Already bookmarked**\n\n**Title:** {bk.title or bk.url}\n**Domain:** {bk.domain}\n**ID:** BK-{str(bk.external_id)[:8]}"
+                        )
                     response_text = "\n\n---\n\n".join(response_lines)
-                    # Block WS briefly to POST
                     requests.post(
                         f"{base_url}/api/v4/posts",
                         headers=headers,

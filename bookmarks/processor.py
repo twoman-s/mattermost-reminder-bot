@@ -93,9 +93,8 @@ def _process_bookmark(bookmark_id: int, channel_id: str) -> None:
             bookmark.title[:60],
         )
 
-        # 6. Send enriched preview to Mattermost
-        if channel_id:
-            _send_enriched_preview(bookmark, channel_id)
+        # 6. Send enriched preview to Mattermost (to the default channel)
+        _send_enriched_preview(bookmark)
 
     except Exception:
         logger.error(
@@ -107,11 +106,14 @@ def _process_bookmark(bookmark_id: int, channel_id: str) -> None:
         bookmark.save()
 
 
-def _send_enriched_preview(bookmark: Bookmark, channel_id: str) -> None:
+def _send_enriched_preview(bookmark: Bookmark) -> None:
     """Send the enriched bookmark preview back to the Mattermost channel."""
     from reminders.services.mattermost import MattermostService
+    from django.conf import settings
 
     mm = MattermostService()
+    # Always post to the designated bot channel rather than the DM chat
+    channel_id = settings.MATTERMOST_REMINDER_CHANNEL_ID
 
     lines = [
         "📚 **Bookmark Saved**",
@@ -139,9 +141,9 @@ def _send_enriched_preview(bookmark: Bookmark, channel_id: str) -> None:
         if meta.get("subreddit"):
             lines.append(f"\n**Subreddit:** r/{meta['subreddit']}")
 
-    # Image preview
+    # Image preview (100x80 as requested)
     if bookmark.image_url:
-        lines.append(f"\n![preview]({bookmark.image_url})")
+        lines.append(f"\n![preview]({bookmark.image_url} =100x80)")
 
     message = "\n".join(lines)
 

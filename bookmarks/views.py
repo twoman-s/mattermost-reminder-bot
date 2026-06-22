@@ -318,7 +318,7 @@ class SlashListbView(APIView):
                 
                 img_md = ""
                 if bk.image_url:
-                    img_md = f"![img]({bk.image_url})\n\n"
+                    img_md = f"![img]({bk.image_url} =100x80)\n\n"
 
                 intro_lines.append(
                     f"{img_md}**{type_emoji} [{title_clean}]({bk.url})**\n"
