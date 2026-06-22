@@ -142,14 +142,14 @@ class DMWebhookView(APIView):
         # Build immediate acknowledgement
         response_lines: list[str] = []
 
-        if created_bookmarks:
-            for bk in created_bookmarks:
-                response_lines.append(
-                    f"📚 **Bookmark Saved**\n\n"
-                    f"**URL:** {bk.url}\n"
-                    f"**Domain:** {bk.domain}\n\n"
-                    f"_Processing metadata..._"
-                )
+        # if created_bookmarks:
+        #     for bk in created_bookmarks:
+        #         response_lines.append(
+        #             f"📚 **Bookmark Saved**\n\n"
+        #             f"**URL:** {bk.url}\n"
+        #             f"**Domain:** {bk.domain}\n\n"
+        #             f"_Processing metadata..._"
+        #         )
 
         if duplicate_bookmarks:
             for bk in duplicate_bookmarks:

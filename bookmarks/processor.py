@@ -143,7 +143,7 @@ def _send_enriched_preview(bookmark: Bookmark) -> None:
 
     # Image preview (100x80 as requested)
     if bookmark.image_url:
-        lines.append(f"\n![preview]({bookmark.image_url} =100x80)")
+        lines.append(f"\n![preview]({bookmark.image_url} =240x120)")
 
     message = "\n".join(lines)
 
