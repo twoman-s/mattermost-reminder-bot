@@ -469,9 +469,21 @@ class BookmarkDialogRefreshView(APIView):
         logger.info("Bookmark dialog refresh received. Submission: %s", submission)
 
         listb_view = SlashListbView()
+        # Since we're in the refresh view, we must provide the request so build_absolute_uri works
+        listb_view.request = request 
         dialog_data = listb_view._build_bookmark_dialog(submission)
 
-        return Response(dialog_data, status=status.HTTP_200_OK)
+        return Response({
+            "type": "form",
+            "form": {
+                "callback_id": dialog_data["callback_id"],
+                "title": dialog_data["title"],
+                "submit_label": dialog_data["submit_label"],
+                "introduction_text": dialog_data["introduction_text"],
+                "source_url": dialog_data["source_url"],
+                "elements": dialog_data["elements"],
+            }
+        }, status=status.HTTP_200_OK)
 
 
 class BookmarkDialogSubmitView(APIView):
