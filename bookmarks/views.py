@@ -297,7 +297,7 @@ class SlashListbView(APIView):
         page_obj = paginator.get_page(page_num) if total_count > 0 else []
 
         intro_lines = [
-            f"### Bookmark Vault ({total_count} total)",
+            f"Bookmark Vault ({total_count} total)",
             "---",
         ]
 
@@ -325,11 +325,15 @@ class SlashListbView(APIView):
                     img_md = f"![img]({bk.image_url} =250x120)\n\n"
                 
                 intro_lines.append(
-                    f"{img_md}**{type_emoji} [{title_clean}]({bk.url})**\n"
-                    f"**Domain:** {bk.domain} | **Date:** {bk.created_at.strftime('%Y-%m-%d')}\n"
-                    f"**Tags:** {tags_str or 'None'}\n"
-                    f"> {desc}\n\n"
-                    "---\n"
+                    f"> {img_md}\n"
+                    f">\n"
+                    f"> ### {type_emoji} [{title_clean}]({bk.url})\n"
+                    f"> {desc}\n"
+                    f">\n"
+                    f"> **🌐 {bk.domain}** • {bk.created_at.strftime('%Y-%m-%d')}\n"
+                    f"> **🏷️ {tags_str or 'None'}**\n"
+                    f">\n"
+                    f"> ---\n"
                 )
 
                 manage_options.append({
