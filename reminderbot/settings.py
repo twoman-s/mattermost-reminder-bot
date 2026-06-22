@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     # Local
     "reminders",
+    "bookmarks",
 ]
 
 MIDDLEWARE = [
@@ -106,6 +107,10 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Media files (bookmark assets, images)
+MEDIA_URL = "/media/"
+MEDIA_ROOT = DATA_DIR / "media"
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
@@ -206,6 +211,11 @@ LOGGING = {
         },
         # Application loggers
         "reminders": {
+            "handlers": ["console", "file"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        "bookmarks": {
             "handlers": ["console", "file"],
             "level": "DEBUG",
             "propagate": False,
