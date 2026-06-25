@@ -172,11 +172,13 @@ class DMWebhookView(APIView):
 # ======================================================================
 
 
-class BookmarkViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    Bookmark API — read-only with search, detail, and export.
+from urllib.parse import urlparse
 
-    Bookmarks are created via DM webhooks, not through the API.
+class BookmarkViewSet(viewsets.ModelViewSet):
+    """
+    Bookmark API — list, search, detail, export, and synchronous creation.
+    
+    Creating a bookmark synchronously runs the full metadata extraction pipeline.
     """
 
     queryset = Bookmark.objects.all()
@@ -218,6 +220,48 @@ class BookmarkViewSet(viewsets.ReadOnlyModelViewSet):
     )
     def retrieve(self, request: Request, *args, **kwargs) -> Response:
         return super().retrieve(request, *args, **kwargs)
+
+    @extend_schema(
+        tags=["Bookmarks"],
+        summary="Create bookmark synchronously",
+        description="Creates a bookmark and blocks until metadata is extracted and saved.",
+        request={"application/json": {"properties": {"url": {"type": "string", "example": "https://example.com"}}}},
+        responses={201: BookmarkDetailSerializer},
+    )
+    def create(self, request: Request, *args, **kwargs) -> Response:
+        url = request.data.get("url")
+        if not url:
+            return Response({"error": "url is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        domain = urlparse(url).netloc or ""
+        
+        # Check if it already exists
+        existing = Bookmark.objects.filter(url=url).first()
+        if existing:
+            serializer = BookmarkDetailSerializer(existing)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+            
+        # Create it synchronously
+        from bookmarks.models import BookmarkStatus
+        from bookmarks.processor import _process_bookmark
+        from django.db import IntegrityError
+        
+        try:
+            bookmark = Bookmark.objects.create(
+                url=url,
+                domain=domain,
+                status=BookmarkStatus.PROCESSING,
+            )
+        except IntegrityError:
+            return Response({"error": "Failed to create bookmark"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Process synchronously (pass empty channel_id so it doesn't notify mattermost)
+        _process_bookmark(bookmark.pk, channel_id="")
+        
+        # Refresh from DB
+        bookmark.refresh_from_db()
+        serializer = BookmarkDetailSerializer(bookmark)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @extend_schema(
         tags=["Bookmarks"],
