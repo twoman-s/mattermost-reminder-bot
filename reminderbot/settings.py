@@ -33,6 +33,11 @@ DEBUG = env("DEBUG")
 
 ALLOWED_HOSTS = ["*"]
 
+CORS_ALLOWED_ORIGINS = [
+    "app://obsidian.md",
+]
+CORS_ALLOW_ALL_ORIGINS = True  # Enable this if you run into any more electron issues, but the explicit origin above should work.
+
 # Application definition
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -44,6 +49,7 @@ INSTALLED_APPS = [
     # Third-party
     "rest_framework",
     "drf_spectacular",
+    "corsheaders",
     # Local
     "reminders",
     "bookmarks",
@@ -51,6 +57,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
